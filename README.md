@@ -4,35 +4,38 @@ Desktop viewer for GitHub sub-issues. Nested parent/child comes from GitHub's ow
 
 See [SPEC.md](SPEC.md).
 
-## Features (MVP)
+## Features
 
-- Sign in with GitHub OAuth Device Flow
-- Pick a repository you can access
-- Show **open** issues nested by parent/child
-- Draw the SQLite cache immediately, then sync in the background
-- UI in English and Japanese
+- Sign in with GitHub OAuth Device Flow (session kept until Sign out)
+- Restore last repository, issue, window size, and pane widths
+- Three panes: issue tree, markdown body, related parent/child
+- Filter/sort (`is:open`, Open/Closed, created/updated)
+- English and Japanese UI
 - Bundled Noto Sans JP (SIL Open Font License)
 
 Read-only: the app does not create, edit, or close issues.
 
-## Setup
+## Install
 
-1. Create a GitHub OAuth App: https://github.com/settings/applications/new  
-   Homepage URL can be `http://127.0.0.1`. Callback URL is unused for Device Flow.
-2. Enable **Device Flow** on the app.
-3. Request the `repo` scope (needed for private repositories).
-4. Paste the public Client ID into `src/config.rs` (`GITHUB_CLIENT_ID`). It is not a secret.
-5. Run:
+Download the latest build from this repository’s **Releases** page.
 
-```bash
-cargo run
-```
+| File | Platform |
+|------|----------|
+| `issue-viewer-windows-x64.exe` | Windows |
+| `issue-viewer-macos-arm64` | macOS (Apple silicon) |
+| `issue-viewer-linux-x64` | Linux |
+
+Run the binary. Sign in with GitHub when asked. The OAuth Client ID is already compiled in — you do not create an OAuth App.
+
+Windows may warn on an unsigned download (SmartScreen). Use **More info** → **Run anyway**.
+
+Linux needs the usual desktop libraries (GTK 3 / X11). If the binary fails to start, install your distro’s `libgtk-3` package.
 
 ## Data
 
 - Access token: OS keyring (`issue-viewer` / `github`), never stored in SQLite. Survives app restarts until **Sign out**.
-- Last selected repository: SQLite session row, cleared on sign-out
-- Issue cache: `cache.sqlite` under the user data directory (`issue-viewer`)
+- Last selected repository and issue, plus window/pane layout: SQLite under the user data directory (`issue-viewer`)
+- Issue cache: `cache.sqlite` in that same directory
 
 ## Font
 
@@ -42,4 +45,9 @@ cargo run
 
 ```bash
 cargo test
+cargo run --release
 ```
+
+Tagged `v*` pushes build the three binaries and publish a GitHub Release (see `.github/workflows/release.yml`).
+
+To change the compiled OAuth App, edit `src/config.rs` (`GITHUB_CLIENT_ID`). Create an OAuth App at https://github.com/settings/applications/new, enable **Device Flow**, request the `repo` scope.
