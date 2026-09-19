@@ -20,8 +20,10 @@ This app is a lightweight desktop viewer: sign in with GitHub OAuth, pick a repo
 - After sign-in, the app lists repositories the user can access. The user picks one and the app shows that repository’s issues. The user can switch repository.
 - Parent/child comes from GitHub sub-issues. Adding issues to GitHub Projects is not required.
 - Issue tree data is stored in a local SQLite database so the UI does not hit GitHub on every view, nested parent/child rows are cheap to query, and a previously synced tree remains usable offline.
-- First release caches tree metadata only: issue number, title, open/closed, parent, and GitHub `updated_at`. Issue bodies and comments are not stored yet.
-- On open, the app draws the SQLite tree immediately, then syncs from GitHub in the background when the network is available. The UI shows last-synced time. The user can refresh manually.
+- The cache stores issue number, title, body, open/closed, parent, `created_at`, and GitHub `updated_at`. Comments are not stored.
+- Refresh upserts issues whose GitHub `updated_at` is at or after the newest cached `updated_at` for that repository. A full replace runs only when that repository has no cached rows. Issues deleted on GitHub are not removed by an incremental refresh.
+- Selecting an issue reads the cached body. The app does not call a per-issue GitHub detail API on select or refresh.
+- On open, the app draws the SQLite tree immediately, then syncs from GitHub in the background when the network is available. The UI shows last-synced time. The user can refresh manually. Only one issue sync runs at a time.
 - The OAuth token is not stored in the SQLite issue database in plaintext. It is kept in the OS keyring until the user signs out, so a restart does not ask for login again.
 - Children nest under their parent. Deeper sub-issues nest further. Rows can expand and collapse.
 - Each row shows at least issue number, title, and open/closed.

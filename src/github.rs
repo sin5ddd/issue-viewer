@@ -16,6 +16,8 @@ struct GqlData {
 #[derive(Debug, Deserialize)]
 struct GqlRate {
     remaining: u32,
+    #[serde(default)]
+    cost: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,18 +65,21 @@ pub struct IssuePage {
     pub has_next: bool,
     pub end_cursor: Option<String>,
     pub rate_remaining: Option<u32>,
+    pub rate_cost: Option<u32>,
 }
 
 pub fn rows_from_graphql_json(json: &str) -> Result<IssuePage, serde_json::Error> {
     let parsed: GqlResponse = serde_json::from_str(json)?;
-    let remaining = parsed
+    let (remaining, cost) = parsed
         .data
         .as_ref()
         .and_then(|d| d.rate_limit.as_ref())
-        .map(|r| r.remaining);
+        .map(|r| (Some(r.remaining), r.cost))
+        .unwrap_or((None, None));
     let Some(issues) = parsed.data.and_then(|d| d.repository).map(|r| r.issues) else {
         return Ok(IssuePage {
             rate_remaining: remaining,
+            rate_cost: cost,
             ..IssuePage::default()
         });
     };
@@ -100,14 +105,15 @@ pub fn rows_from_graphql_json(json: &str) -> Result<IssuePage, serde_json::Error
         has_next: issues.page_info.has_next_page,
         end_cursor: issues.page_info.end_cursor,
         rate_remaining: remaining,
+        rate_cost: cost,
     })
 }
 
 pub const ISSUES_QUERY: &str = r#"
-query($owner: String!, $name: String!, $cursor: String) {
-  rateLimit { remaining resetAt }
+query($owner: String!, $name: String!, $cursor: String, $since: DateTime) {
+  rateLimit { remaining resetAt cost }
   repository(owner: $owner, name: $name) {
-    issues(first: 100, after: $cursor, states: [OPEN, CLOSED], orderBy: {field: UPDATED_AT, direction: DESC}) {
+    issues(first: 100, after: $cursor, states: [OPEN, CLOSED], filterBy: { since: $since }, orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
@@ -144,6 +150,7 @@ pub trait GitHubClient {
         owner: &str,
         repo: &str,
         cursor: Option<&str>,
+        since: Option<&str>,
     ) -> Result<IssuePage, GitHubError>;
 }
 
@@ -202,10 +209,11 @@ impl GitHubClient for LiveClient {
         owner: &str,
         repo: &str,
         cursor: Option<&str>,
+        since: Option<&str>,
     ) -> Result<IssuePage, GitHubError> {
         let body = serde_json::json!({
             "query": ISSUES_QUERY,
-            "variables": { "owner": owner, "name": repo, "cursor": cursor },
+            "variables": { "owner": owner, "name": repo, "cursor": cursor, "since": since },
         });
         let resp = self
             .http
@@ -234,7 +242,7 @@ mod tests {
     fn parses_parent_number() {
         let json = r#"{
           "data": {
-            "rateLimit": { "remaining": 4990 },
+            "rateLimit": { "remaining": 4990, "cost": 1 },
             "repository": {
               "issues": {
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
@@ -265,6 +273,7 @@ mod tests {
         let page = rows_from_graphql_json(json).unwrap();
         assert!(!page.has_next);
         assert_eq!(page.rate_remaining, Some(4990));
+        assert_eq!(page.rate_cost, Some(1));
         assert_eq!(page.rows[1].parent_number, Some(1));
         assert_eq!(page.rows[1].body, "world");
         assert_eq!(page.rows[1].state, IssueState::Closed);

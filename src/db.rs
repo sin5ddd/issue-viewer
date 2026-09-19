@@ -123,37 +123,68 @@ impl Cache {
         Ok(())
     }
 
+    fn upsert_issues_in(
+        tx: &rusqlite::Transaction<'_>,
+        owner: &str,
+        repo: &str,
+        rows: &[IssueRow],
+    ) -> Result<()> {
+        let mut stmt = tx.prepare(
+            "INSERT INTO issues (owner, repo, number, title, state, parent_number, updated_at, body, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(owner, repo, number) DO UPDATE SET
+               title = excluded.title,
+               state = excluded.state,
+               parent_number = excluded.parent_number,
+               updated_at = excluded.updated_at,
+               body = excluded.body,
+               created_at = excluded.created_at",
+        )?;
+        for r in rows {
+            let state = match r.state {
+                IssueState::Open => "open",
+                IssueState::Closed => "closed",
+            };
+            stmt.execute(rusqlite::params![
+                owner,
+                repo,
+                r.number as i64,
+                r.title,
+                state,
+                r.parent_number.map(|n| n as i64),
+                r.updated_at,
+                r.body,
+                r.created_at,
+            ])?;
+        }
+        Ok(())
+    }
+
     pub fn upsert_issues(&self, owner: &str, repo: &str, rows: &[IssueRow]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        Self::upsert_issues_in(&tx, owner, repo, rows)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn replace_issues(&self, owner: &str, repo: &str, rows: &[IssueRow]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM issues WHERE owner = ?1 AND repo = ?2",
             rusqlite::params![owner, repo],
         )?;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO issues (owner, repo, number, title, state, parent_number, updated_at, body, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )?;
-            for r in rows {
-                let state = match r.state {
-                    IssueState::Open => "open",
-                    IssueState::Closed => "closed",
-                };
-                stmt.execute(rusqlite::params![
-                    owner,
-                    repo,
-                    r.number as i64,
-                    r.title,
-                    state,
-                    r.parent_number.map(|n| n as i64),
-                    r.updated_at,
-                    r.body,
-                    r.created_at,
-                ])?;
-            }
-        }
+        Self::upsert_issues_in(&tx, owner, repo, rows)?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn max_updated_at(&self, owner: &str, repo: &str) -> Result<Option<String>> {
+        let value: Option<String> = self.conn.query_row(
+            "SELECT MAX(updated_at) FROM issues WHERE owner = ?1 AND repo = ?2",
+            rusqlite::params![owner, repo],
+            |row| row.get(0),
+        )?;
+        Ok(value.filter(|s| !s.is_empty()))
     }
 
     pub fn list_issues(&self, owner: &str, repo: &str) -> Result<Vec<IssueRow>> {
@@ -207,22 +238,13 @@ impl Cache {
                 [],
                 |row| {
                     let issue: Option<i64> = row.get(2)?;
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        issue.map(|n| n as u64),
-                    ))
+                    Ok((row.get(0)?, row.get(1)?, issue.map(|n| n as u64)))
                 },
             )
             .optional()
     }
 
-    pub fn set_last_repo(
-        &self,
-        owner: &str,
-        repo: &str,
-        issue_number: Option<u64>,
-    ) -> Result<()> {
+    pub fn set_last_repo(&self, owner: &str, repo: &str, issue_number: Option<u64>) -> Result<()> {
         self.conn.execute(
             "INSERT INTO session (id, owner, repo, issue_number) VALUES (1, ?1, ?2, ?3)
              ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, repo = excluded.repo, issue_number = excluded.issue_number",
@@ -268,13 +290,53 @@ mod tests {
     }
 
     #[test]
-    fn upsert_replaces_repo_rows() {
+    fn upsert_keeps_untouched_rows() {
         let cache = Cache::open_memory().unwrap();
         cache.upsert_issues("acme", "app", &[row(1, None)]).unwrap();
         cache.upsert_issues("acme", "app", &[row(3, None)]).unwrap();
         let got = cache.list_issues("acme", "app").unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().any(|r| r.number == 1));
+        assert!(got.iter().any(|r| r.number == 3));
+    }
+
+    #[test]
+    fn replace_issues_drops_missing_numbers() {
+        let cache = Cache::open_memory().unwrap();
+        cache.upsert_issues("acme", "app", &[row(1, None)]).unwrap();
+        cache
+            .replace_issues("acme", "app", &[row(3, None)])
+            .unwrap();
+        let got = cache.list_issues("acme", "app").unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].number, 3);
+    }
+
+    #[test]
+    fn max_updated_at_none_then_latest() {
+        let cache = Cache::open_memory().unwrap();
+        assert_eq!(cache.max_updated_at("acme", "app").unwrap(), None);
+        let mut newer = row(2, None);
+        newer.updated_at = "2026-02-01T00:00:00Z".into();
+        cache
+            .upsert_issues("acme", "app", &[row(1, None), newer])
+            .unwrap();
+        assert_eq!(
+            cache.max_updated_at("acme", "app").unwrap().as_deref(),
+            Some("2026-02-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn upsert_overwrites_body_for_same_number() {
+        let cache = Cache::open_memory().unwrap();
+        cache.upsert_issues("acme", "app", &[row(1, None)]).unwrap();
+        let mut updated = row(1, None);
+        updated.body = "changed".into();
+        cache.upsert_issues("acme", "app", &[updated]).unwrap();
+        let got = cache.list_issues("acme", "app").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].body, "changed");
     }
 
     #[test]

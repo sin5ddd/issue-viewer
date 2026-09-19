@@ -21,7 +21,9 @@ enum UiMsg {
     },
     LoggedIn(String),
     Repos(Vec<RepoRef>),
-    SyncDone { remaining: Option<u32> },
+    SyncDone {
+        remaining: Option<u32>,
+    },
     Error(String),
 }
 
@@ -52,6 +54,7 @@ pub struct IssueViewerApp {
     last_synced: Option<String>,
     status: String,
     loading: bool,
+    syncing: bool,
     layout: UiLayout,
     tx: Sender<UiMsg>,
     rx: Receiver<UiMsg>,
@@ -84,6 +87,7 @@ impl IssueViewerApp {
             last_synced: None,
             status: String::new(),
             loading: false,
+            syncing: false,
             layout: Cache::open(&Self::cache_path())
                 .ok()
                 .and_then(|c| c.ui_layout().ok())
@@ -201,6 +205,10 @@ impl IssueViewerApp {
     }
 
     fn spawn_sync(&mut self, token: String, owner: String, repo: String) {
+        if self.syncing {
+            return;
+        }
+        self.syncing = true;
         self.loading = true;
         let tx = self.tx.clone();
         thread::spawn(move || {
@@ -279,15 +287,19 @@ impl IssueViewerApp {
                 }
                 UiMsg::Repos(repos) => {
                     self.repos = repos;
-                    self.loading = false;
+                    if !self.syncing {
+                        self.loading = false;
+                    }
                 }
                 UiMsg::SyncDone { remaining } => {
+                    self.syncing = false;
                     self.loading = false;
                     self.rate_remaining = remaining;
                     self.status.clear();
                     self.reload_tree();
                 }
                 UiMsg::Error(e) => {
+                    self.syncing = false;
                     self.loading = false;
                     self.status = e;
                 }
@@ -346,11 +358,9 @@ impl IssueViewerApp {
                 ui.painter().rect_filled(rect, 3.0, fill);
             }
             ui.allocate_new_ui(
-                eframe::egui::UiBuilder::new()
-                    .max_rect(rect)
-                    .layout(eframe::egui::Layout::left_to_right(
-                        eframe::egui::Align::Center,
-                    )),
+                eframe::egui::UiBuilder::new().max_rect(rect).layout(
+                    eframe::egui::Layout::left_to_right(eframe::egui::Align::Center),
+                ),
                 |ui| {
                     if has_children {
                         if Self::disclosure(ui, open) {
@@ -360,7 +370,8 @@ impl IssueViewerApp {
                         ui.add_space(14.0);
                     }
                     ui.add(
-                        eframe::egui::Label::new(format!("#{}", node.issue.number)).selectable(false),
+                        eframe::egui::Label::new(format!("#{}", node.issue.number))
+                            .selectable(false),
                     );
                     Self::state_pill(ui, node.issue.state);
                     ui.add(
@@ -421,7 +432,12 @@ impl IssueViewerApp {
         }
     }
 
-    fn pill(ui: &mut eframe::egui::Ui, text: &str, fg: eframe::egui::Color32, bg: eframe::egui::Color32) {
+    fn pill(
+        ui: &mut eframe::egui::Ui,
+        text: &str,
+        fg: eframe::egui::Color32,
+        bg: eframe::egui::Color32,
+    ) {
         eframe::egui::Frame::new()
             .fill(bg)
             .corner_radius(10.0)
@@ -499,7 +515,12 @@ impl eframe::App for IssueViewerApp {
                             self.spawn_sync(token, owner, name);
                         }
                     }
-                    if ui.button(self.lang.t("refresh")).clicked()
+                    if ui
+                        .add_enabled(
+                            !self.syncing,
+                            eframe::egui::Button::new(self.lang.t("refresh")),
+                        )
+                        .clicked()
                         && let (Some(token), Some((o, r))) =
                             (self.token_value.clone(), self.selected.clone())
                     {
