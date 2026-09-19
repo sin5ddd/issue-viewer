@@ -1,6 +1,25 @@
 use crate::model::{IssueRow, IssueState};
 use rusqlite::{Connection, OptionalExtension, Result};
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiLayout {
+    pub window_w: f32,
+    pub window_h: f32,
+    pub left_w: f32,
+    pub right_w: f32,
+}
+
+impl Default for UiLayout {
+    fn default() -> Self {
+        Self {
+            window_w: 1366.0,
+            window_h: 768.0,
+            left_w: 280.0,
+            right_w: 240.0,
+        }
+    }
+}
+
 pub struct Cache {
     conn: Connection,
 }
@@ -48,7 +67,58 @@ impl Cache {
                 owner TEXT NOT NULL,
                 repo TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS ui_layout (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                window_w REAL NOT NULL,
+                window_h REAL NOT NULL,
+                left_w REAL NOT NULL,
+                right_w REAL NOT NULL
+            );
             ",
+        )?;
+        for sql in [
+            "ALTER TABLE issues ADD COLUMN body TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE issues ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE session ADD COLUMN issue_number INTEGER",
+        ] {
+            let _ = self.conn.execute_batch(sql);
+        }
+        Ok(())
+    }
+
+    pub fn ui_layout(&self) -> Result<UiLayout> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT window_w, window_h, left_w, right_w FROM ui_layout WHERE id = 1",
+                [],
+                |row| {
+                    Ok(UiLayout {
+                        window_w: row.get(0)?,
+                        window_h: row.get(1)?,
+                        left_w: row.get(2)?,
+                        right_w: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or_default())
+    }
+
+    pub fn set_ui_layout(&self, layout: &UiLayout) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO ui_layout (id, window_w, window_h, left_w, right_w) VALUES (1, ?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+               window_w = excluded.window_w,
+               window_h = excluded.window_h,
+               left_w = excluded.left_w,
+               right_w = excluded.right_w",
+            rusqlite::params![
+                layout.window_w,
+                layout.window_h,
+                layout.left_w,
+                layout.right_w
+            ],
         )?;
         Ok(())
     }
@@ -61,8 +131,8 @@ impl Cache {
         )?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO issues (owner, repo, number, title, state, parent_number, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO issues (owner, repo, number, title, state, parent_number, updated_at, body, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for r in rows {
                 let state = match r.state {
@@ -77,6 +147,8 @@ impl Cache {
                     state,
                     r.parent_number.map(|n| n as i64),
                     r.updated_at,
+                    r.body,
+                    r.created_at,
                 ])?;
             }
         }
@@ -86,7 +158,7 @@ impl Cache {
 
     pub fn list_issues(&self, owner: &str, repo: &str) -> Result<Vec<IssueRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT number, title, state, parent_number, updated_at
+            "SELECT number, title, state, parent_number, updated_at, body, created_at
              FROM issues WHERE owner = ?1 AND repo = ?2 ORDER BY number",
         )?;
         let rows = stmt.query_map(rusqlite::params![owner, repo], |row| {
@@ -102,6 +174,8 @@ impl Cache {
                 },
                 parent_number: parent.map(|n| n as u64),
                 updated_at: row.get(4)?,
+                body: row.get(5)?,
+                created_at: row.get(6)?,
             })
         })?;
         rows.collect()
@@ -126,19 +200,33 @@ impl Cache {
         Ok(())
     }
 
-    pub fn last_repo(&self) -> Result<Option<(String, String)>> {
+    pub fn last_repo(&self) -> Result<Option<(String, String, Option<u64>)>> {
         self.conn
-            .query_row("SELECT owner, repo FROM session WHERE id = 1", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+            .query_row(
+                "SELECT owner, repo, issue_number FROM session WHERE id = 1",
+                [],
+                |row| {
+                    let issue: Option<i64> = row.get(2)?;
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        issue.map(|n| n as u64),
+                    ))
+                },
+            )
             .optional()
     }
 
-    pub fn set_last_repo(&self, owner: &str, repo: &str) -> Result<()> {
+    pub fn set_last_repo(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: Option<u64>,
+    ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO session (id, owner, repo) VALUES (1, ?1, ?2)
-             ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, repo = excluded.repo",
-            rusqlite::params![owner, repo],
+            "INSERT INTO session (id, owner, repo, issue_number) VALUES (1, ?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, repo = excluded.repo, issue_number = excluded.issue_number",
+            rusqlite::params![owner, repo, issue_number.map(|n| n as i64)],
         )?;
         Ok(())
     }
@@ -157,8 +245,10 @@ mod tests {
         IssueRow {
             number: n,
             title: format!("t{n}"),
+            body: format!("body{n}"),
             state: IssueState::Open,
             parent_number: parent,
+            created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
         }
     }
@@ -171,10 +261,10 @@ mod tests {
             .unwrap();
         let got = cache.list_issues("acme", "app").unwrap();
         assert_eq!(got.len(), 2);
-        assert_eq!(
-            got.iter().find(|r| r.number == 2).unwrap().parent_number,
-            Some(1)
-        );
+        let two = got.iter().find(|r| r.number == 2).unwrap();
+        assert_eq!(two.parent_number, Some(1));
+        assert_eq!(two.body, "body2");
+        assert_eq!(two.created_at, "2026-01-01T00:00:00Z");
     }
 
     #[test]
@@ -204,12 +294,46 @@ mod tests {
     fn last_repo_roundtrip_until_cleared() {
         let cache = Cache::open_memory().unwrap();
         assert_eq!(cache.last_repo().unwrap(), None);
-        cache.set_last_repo("acme", "app").unwrap();
+        cache.set_last_repo("acme", "app", None).unwrap();
         assert_eq!(
             cache.last_repo().unwrap(),
-            Some(("acme".into(), "app".into()))
+            Some(("acme".into(), "app".into(), None))
         );
         cache.clear_last_repo().unwrap();
         assert_eq!(cache.last_repo().unwrap(), None);
+    }
+
+    #[test]
+    fn session_roundtrip_includes_issue_number() {
+        let cache = Cache::open_memory().unwrap();
+        cache.set_last_repo("acme", "app", Some(7)).unwrap();
+        assert_eq!(
+            cache.last_repo().unwrap(),
+            Some(("acme".into(), "app".into(), Some(7)))
+        );
+    }
+
+    #[test]
+    fn session_issue_none() {
+        let cache = Cache::open_memory().unwrap();
+        cache.set_last_repo("acme", "app", None).unwrap();
+        assert_eq!(
+            cache.last_repo().unwrap(),
+            Some(("acme".into(), "app".into(), None))
+        );
+    }
+
+    #[test]
+    fn ui_layout_defaults_then_roundtrip() {
+        let cache = Cache::open_memory().unwrap();
+        assert_eq!(cache.ui_layout().unwrap(), UiLayout::default());
+        let layout = UiLayout {
+            window_w: 1600.0,
+            window_h: 900.0,
+            left_w: 320.0,
+            right_w: 200.0,
+        };
+        cache.set_ui_layout(&layout).unwrap();
+        assert_eq!(cache.ui_layout().unwrap(), layout);
     }
 }

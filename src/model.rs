@@ -2,8 +2,10 @@
 pub struct IssueRow {
     pub number: u64,
     pub title: String,
+    pub body: String,
     pub state: IssueState,
     pub parent_number: Option<u64>,
+    pub created_at: String,
     pub updated_at: String,
 }
 

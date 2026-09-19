@@ -51,6 +51,36 @@ pub fn build_tree(rows: &[IssueRow]) -> Vec<TreeNode> {
     build(None, &by_parent)
 }
 
+pub fn focus_tree(rows: &[IssueRow], selected: u64) -> Vec<TreeNode> {
+    let by_num: HashMap<u64, &IssueRow> = rows.iter().map(|r| (r.number, r)).collect();
+    if !by_num.contains_key(&selected) {
+        return Vec::new();
+    }
+    let mut keep = HashSet::new();
+    keep.insert(selected);
+    let mut cur = by_num.get(&selected).and_then(|r| r.parent_number);
+    while let Some(p) = cur {
+        if !keep.insert(p) {
+            break;
+        }
+        cur = by_num.get(&p).and_then(|r| r.parent_number);
+    }
+    fn add_descendants(parent: u64, rows: &[IssueRow], keep: &mut HashSet<u64>) {
+        for r in rows {
+            if r.parent_number == Some(parent) && keep.insert(r.number) {
+                add_descendants(r.number, rows, keep);
+            }
+        }
+    }
+    add_descendants(selected, rows, &mut keep);
+    let subset: Vec<IssueRow> = rows
+        .iter()
+        .filter(|r| keep.contains(&r.number))
+        .cloned()
+        .collect();
+    build_tree(&subset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,8 +90,10 @@ mod tests {
         IssueRow {
             number,
             title: title.to_string(),
+            body: String::new(),
             state: IssueState::Open,
             parent_number: parent,
+            created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
         }
     }
@@ -100,6 +132,22 @@ mod tests {
             sample(3, Some(2), "gc"),
         ];
         let tree = build_tree(&rows);
+        assert_eq!(tree[0].children[0].children[0].issue.number, 3);
+    }
+
+    #[test]
+    fn focus_omits_siblings() {
+        let rows = vec![
+            sample(1, None, "p"),
+            sample(2, Some(1), "c"),
+            sample(4, Some(1), "sib"),
+            sample(3, Some(2), "gc"),
+        ];
+        let tree = focus_tree(&rows, 2);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].issue.number, 1);
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].issue.number, 2);
         assert_eq!(tree[0].children[0].children[0].issue.number, 3);
     }
 }

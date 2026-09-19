@@ -8,7 +8,14 @@ struct GqlResponse {
 
 #[derive(Debug, Deserialize)]
 struct GqlData {
+    #[serde(rename = "rateLimit")]
+    rate_limit: Option<GqlRate>,
     repository: Option<GqlRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlRate {
+    remaining: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,7 +42,11 @@ struct GqlPage {
 struct GqlIssue {
     number: u64,
     title: String,
+    #[serde(default)]
+    body: String,
     state: String,
+    #[serde(rename = "createdAt")]
+    created_at: Option<String>,
     #[serde(rename = "updatedAt")]
     updated_at: String,
     parent: Option<GqlParent>,
@@ -46,12 +57,26 @@ struct GqlParent {
     number: u64,
 }
 
-pub fn rows_from_graphql_json(
-    json: &str,
-) -> Result<(Vec<IssueRow>, bool, Option<String>), serde_json::Error> {
+#[derive(Debug, Clone, Default)]
+pub struct IssuePage {
+    pub rows: Vec<IssueRow>,
+    pub has_next: bool,
+    pub end_cursor: Option<String>,
+    pub rate_remaining: Option<u32>,
+}
+
+pub fn rows_from_graphql_json(json: &str) -> Result<IssuePage, serde_json::Error> {
     let parsed: GqlResponse = serde_json::from_str(json)?;
+    let remaining = parsed
+        .data
+        .as_ref()
+        .and_then(|d| d.rate_limit.as_ref())
+        .map(|r| r.remaining);
     let Some(issues) = parsed.data.and_then(|d| d.repository).map(|r| r.issues) else {
-        return Ok((Vec::new(), false, None));
+        return Ok(IssuePage {
+            rate_remaining: remaining,
+            ..IssuePage::default()
+        });
     };
     let rows = issues
         .nodes
@@ -59,31 +84,37 @@ pub fn rows_from_graphql_json(
         .map(|n| IssueRow {
             number: n.number,
             title: n.title,
+            body: n.body,
             state: if n.state.eq_ignore_ascii_case("CLOSED") {
                 IssueState::Closed
             } else {
                 IssueState::Open
             },
             parent_number: n.parent.map(|p| p.number),
+            created_at: n.created_at.unwrap_or_default(),
             updated_at: n.updated_at,
         })
         .collect();
-    Ok((
+    Ok(IssuePage {
         rows,
-        issues.page_info.has_next_page,
-        issues.page_info.end_cursor,
-    ))
+        has_next: issues.page_info.has_next_page,
+        end_cursor: issues.page_info.end_cursor,
+        rate_remaining: remaining,
+    })
 }
 
 pub const ISSUES_QUERY: &str = r#"
 query($owner: String!, $name: String!, $cursor: String) {
+  rateLimit { remaining resetAt }
   repository(owner: $owner, name: $name) {
-    issues(first: 100, after: $cursor, states: OPEN, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    issues(first: 100, after: $cursor, states: [OPEN, CLOSED], orderBy: {field: UPDATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
         title
+        body
         state
+        createdAt
         updatedAt
         parent { number }
       }
@@ -113,7 +144,7 @@ pub trait GitHubClient {
         owner: &str,
         repo: &str,
         cursor: Option<&str>,
-    ) -> Result<(Vec<IssueRow>, bool, Option<String>), GitHubError>;
+    ) -> Result<IssuePage, GitHubError>;
 }
 
 pub struct LiveClient {
@@ -144,6 +175,9 @@ impl GitHubClient for LiveClient {
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(GitHubError::Auth);
         }
+        if resp.status() == reqwest::StatusCode::FORBIDDEN {
+            return Err(GitHubError::Http("rate_limited".into()));
+        }
         #[derive(Deserialize)]
         struct R {
             name: String,
@@ -168,7 +202,7 @@ impl GitHubClient for LiveClient {
         owner: &str,
         repo: &str,
         cursor: Option<&str>,
-    ) -> Result<(Vec<IssueRow>, bool, Option<String>), GitHubError> {
+    ) -> Result<IssuePage, GitHubError> {
         let body = serde_json::json!({
             "query": ISSUES_QUERY,
             "variables": { "owner": owner, "name": repo, "cursor": cursor },
@@ -181,6 +215,12 @@ impl GitHubClient for LiveClient {
             .json(&body)
             .send()
             .map_err(|e| GitHubError::Http(e.to_string()))?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(GitHubError::Auth);
+        }
+        if resp.status() == reqwest::StatusCode::FORBIDDEN {
+            return Err(GitHubError::Http("rate_limited".into()));
+        }
         let text = resp.text().map_err(|e| GitHubError::Http(e.to_string()))?;
         rows_from_graphql_json(&text).map_err(|e| GitHubError::Http(e.to_string()))
     }
@@ -194,6 +234,7 @@ mod tests {
     fn parses_parent_number() {
         let json = r#"{
           "data": {
+            "rateLimit": { "remaining": 4990 },
             "repository": {
               "issues": {
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
@@ -201,14 +242,18 @@ mod tests {
                   {
                     "number": 1,
                     "title": "parent",
+                    "body": "hello",
                     "state": "OPEN",
+                    "createdAt": "2026-01-01T00:00:00Z",
                     "updatedAt": "2026-01-01T00:00:00Z",
                     "parent": null
                   },
                   {
                     "number": 2,
                     "title": "child",
-                    "state": "OPEN",
+                    "body": "world",
+                    "state": "CLOSED",
+                    "createdAt": "2026-01-02T00:00:00Z",
                     "updatedAt": "2026-01-02T00:00:00Z",
                     "parent": { "number": 1 }
                   }
@@ -217,8 +262,12 @@ mod tests {
             }
           }
         }"#;
-        let (rows, more, _) = rows_from_graphql_json(json).unwrap();
-        assert!(!more);
-        assert_eq!(rows[1].parent_number, Some(1));
+        let page = rows_from_graphql_json(json).unwrap();
+        assert!(!page.has_next);
+        assert_eq!(page.rate_remaining, Some(4990));
+        assert_eq!(page.rows[1].parent_number, Some(1));
+        assert_eq!(page.rows[1].body, "world");
+        assert_eq!(page.rows[1].state, IssueState::Closed);
+        assert_eq!(page.rows[0].created_at, "2026-01-01T00:00:00Z");
     }
 }

@@ -40,6 +40,28 @@ impl Lang {
             (Lang::Ja, "need_oauth_app") => {
                 "GitHub App ではなく OAuth App が必要です。https://github.com/settings/developers で作成し、Device Flow を有効にして Client ID を src/config.rs に入れてください。OAuth App の作成は gh ではできません。"
             }
+            (Lang::En, "select_issue") => "Select an issue",
+            (Lang::Ja, "select_issue") => "Issue を選択",
+            (Lang::En, "filter_hint") => "is:open title",
+            (Lang::Ja, "filter_hint") => "is:open タイトル",
+            (Lang::En, "opened") => "Opened",
+            (Lang::Ja, "opened") => "Open",
+            (Lang::En, "closed") => "Closed",
+            (Lang::Ja, "closed") => "Closed",
+            (Lang::En, "created") => "Created",
+            (Lang::Ja, "created") => "作成",
+            (Lang::En, "updated") => "Updated",
+            (Lang::Ja, "updated") => "更新日時",
+            (Lang::En, "asc") => "Asc",
+            (Lang::Ja, "asc") => "昇順",
+            (Lang::En, "desc") => "Desc",
+            (Lang::Ja, "desc") => "降順",
+            (Lang::En, "rate_remaining") => "Rate remaining",
+            (Lang::Ja, "rate_remaining") => "レート残",
+            (Lang::En, "related") => "Related",
+            (Lang::Ja, "related") => "関連",
+            (Lang::En, "rate_limited") => "GitHub rate limit — showing cache",
+            (Lang::Ja, "rate_limited") => "レート制限 — キャッシュを表示",
             _ => key,
         }
     }
