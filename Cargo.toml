@@ -1,6 +1,6 @@
 [package]
 name = "issue-viewer"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]
@@ -20,3 +20,6 @@ pulldown-cmark = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+
+[build-dependencies]
+winresource = "0.1.31"
