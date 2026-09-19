@@ -100,6 +100,7 @@ pub enum GitHubError {
     Auth,
 }
 
+#[derive(Clone, Debug)]
 pub struct RepoRef {
     pub owner: String,
     pub name: String,

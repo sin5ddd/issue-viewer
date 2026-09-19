@@ -1,6 +1,8 @@
 use crate::db::Cache;
 use crate::github::{GitHubClient, GitHubError, RepoRef};
-use crate::model::{IssueRow, IssueState};
+use crate::model::IssueRow;
+#[cfg(test)]
+use crate::model::IssueState;
 
 pub fn sync_repo(
     cache: &Cache,
@@ -31,10 +33,12 @@ pub fn sync_repo(
     Ok(())
 }
 
+#[cfg(test)]
 struct Fake {
     pages: Vec<Vec<IssueRow>>,
 }
 
+#[cfg(test)]
 impl GitHubClient for Fake {
     fn list_repos(&self) -> Result<Vec<RepoRef>, GitHubError> {
         Ok(vec![])
