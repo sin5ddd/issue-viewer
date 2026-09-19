@@ -1,5 +1,7 @@
 # Nested GitHub Issue Viewer
 
+![Issue Viewer](issue-viewer-window.jpg)
+
 Desktop viewer for GitHub sub-issues. Nested parent/child comes from GitHub's own sub-issue links, cached in local SQLite. Issues do not need to be in a GitHub Project.
 
 See [SPEC.md](SPEC.md).
