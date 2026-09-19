@@ -34,6 +34,12 @@ impl Lang {
             (Lang::Ja, "user_code") => "このコードを GitHub に入力",
             (Lang::En, "language") => "Language",
             (Lang::Ja, "language") => "言語",
+            (Lang::En, "need_oauth_app") => {
+                "Create an OAuth App (not a GitHub App) at https://github.com/settings/developers — enable Device Flow, then paste the Client ID into src/config.rs. gh cannot create OAuth Apps."
+            }
+            (Lang::Ja, "need_oauth_app") => {
+                "GitHub App ではなく OAuth App が必要です。https://github.com/settings/developers で作成し、Device Flow を有効にして Client ID を src/config.rs に入れてください。OAuth App の作成は gh ではできません。"
+            }
             _ => key,
         }
     }

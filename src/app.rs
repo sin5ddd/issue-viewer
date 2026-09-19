@@ -3,7 +3,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::auth::{poll_token, request_device_code};
+use crate::auth::{
+    is_placeholder_client_id, poll_token, request_device_code, try_gh_cli_token,
+};
 use crate::config::{GITHUB_CLIENT_ID, GITHUB_SCOPE};
 use crate::db::Cache;
 use crate::github::{GitHubClient, LiveClient, RepoRef};
@@ -76,11 +78,12 @@ impl IssueViewerApp {
     fn spawn_login(&self) {
         let tx = self.tx.clone();
         thread::spawn(move || {
-            if GITHUB_CLIENT_ID == "REPLACE_ME" {
-                let _ = tx.send(UiMsg::Error(
-                    "Set GITHUB_CLIENT_ID in src/config.rs (OAuth App with Device Flow enabled)"
-                        .into(),
-                ));
+            if is_placeholder_client_id(GITHUB_CLIENT_ID) {
+                if let Some(token) = try_gh_cli_token() {
+                    let _ = tx.send(UiMsg::LoggedIn(token));
+                    return;
+                }
+                let _ = tx.send(UiMsg::Error("need_oauth_app".into()));
                 return;
             }
             let http = reqwest::blocking::Client::new();
@@ -279,12 +282,23 @@ impl eframe::App for IssueViewerApp {
                     self.loading = true;
                     self.spawn_login();
                 }
+                if self.loading {
+                    ui.label(self.lang.t("loading"));
+                }
                 if let Some(code) = &self.user_code {
                     ui.label(self.lang.t("user_code"));
                     ui.heading(code);
                     if let Some(uri) = &self.verification_uri {
                         ui.hyperlink(uri);
                     }
+                }
+                if !self.status.is_empty() {
+                    let text = if self.status == "need_oauth_app" {
+                        self.lang.t("need_oauth_app")
+                    } else {
+                        self.status.as_str()
+                    };
+                    ui.colored_label(eframe::egui::Color32::RED, text);
                 }
             } else {
                 ui.horizontal(|ui| {
