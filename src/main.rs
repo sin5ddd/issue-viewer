@@ -11,7 +11,12 @@ mod token;
 mod tree;
 
 fn main() -> eframe::Result<()> {
-    let native = eframe::NativeOptions::default();
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png"))
+        .expect("app icon png");
+    let native = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default().with_icon(icon),
+        ..Default::default()
+    };
     eframe::run_native(
         "Issue Viewer",
         native,
