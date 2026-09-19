@@ -4,11 +4,13 @@ pub trait TokenStore {
     fn clear(&self);
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub struct MemoryTokenStore {
     pub token: std::sync::Mutex<Option<String>>,
 }
 
+#[cfg(test)]
 impl TokenStore for MemoryTokenStore {
     fn load(&self) -> Option<String> {
         self.token.lock().ok().and_then(|g| g.clone())
@@ -25,6 +27,8 @@ impl TokenStore for MemoryTokenStore {
     }
 }
 
+/// Windows Credential Manager / macOS Keychain / Linux Secret Service.
+/// Requires native keyring crate features; without them storage is in-process mock.
 pub struct KeyringTokenStore;
 
 impl TokenStore for KeyringTokenStore {

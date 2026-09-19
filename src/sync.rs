@@ -1,8 +1,9 @@
 use crate::db::Cache;
-use crate::github::{GitHubClient, GitHubError, RepoRef};
-use crate::model::IssueRow;
 #[cfg(test)]
-use crate::model::IssueState;
+use crate::github::RepoRef;
+use crate::github::{GitHubClient, GitHubError};
+#[cfg(test)]
+use crate::model::{IssueRow, IssueState};
 
 pub fn sync_repo(
     cache: &Cache,

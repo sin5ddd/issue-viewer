@@ -22,7 +22,7 @@ This app is a lightweight desktop viewer: sign in with GitHub OAuth, pick a repo
 - Issue tree data is stored in a local SQLite database so the UI does not hit GitHub on every view, nested parent/child rows are cheap to query, and a previously synced tree remains usable offline.
 - First release caches tree metadata only: issue number, title, open/closed, parent, and GitHub `updated_at`. Issue bodies and comments are not stored yet.
 - On open, the app draws the SQLite tree immediately, then syncs from GitHub in the background when the network is available. The UI shows last-synced time. The user can refresh manually.
-- The OAuth token is not stored in the SQLite issue database in plaintext.
+- The OAuth token is not stored in the SQLite issue database in plaintext. It is kept in the OS keyring until the user signs out, so a restart does not ask for login again.
 - Children nest under their parent. Deeper sub-issues nest further. Rows can expand and collapse.
 - Each row shows at least issue number, title, and open/closed.
 - Choosing a row opens that GitHub issue in the default browser.

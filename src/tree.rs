@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::model::{IssueRow, IssueState};
+use crate::model::IssueRow;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TreeNode {
@@ -14,10 +14,10 @@ pub fn build_tree(rows: &[IssueRow]) -> Vec<TreeNode> {
         .iter()
         .map(|r| {
             let mut row = r.clone();
-            if let Some(p) = row.parent_number {
-                if !present.contains(&p) {
-                    row.parent_number = None;
-                }
+            if let Some(p) = row.parent_number
+                && !present.contains(&p)
+            {
+                row.parent_number = None;
             }
             row
         })
@@ -30,7 +30,10 @@ pub fn build_tree(rows: &[IssueRow]) -> Vec<TreeNode> {
             .or_default()
             .push(row.clone());
     }
-    fn build(parent: Option<u64>, by_parent: &HashMap<Option<u64>, Vec<IssueRow>>) -> Vec<TreeNode> {
+    fn build(
+        parent: Option<u64>,
+        by_parent: &HashMap<Option<u64>, Vec<IssueRow>>,
+    ) -> Vec<TreeNode> {
         by_parent
             .get(&parent)
             .cloned()
@@ -48,26 +51,24 @@ pub fn build_tree(rows: &[IssueRow]) -> Vec<TreeNode> {
     build(None, &by_parent)
 }
 
-fn sample(number: u64, parent: Option<u64>, title: &str) -> IssueRow {
-    IssueRow {
-        number,
-        title: title.to_string(),
-        state: IssueState::Open,
-        parent_number: parent,
-        updated_at: "2026-01-01T00:00:00Z".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::IssueState;
+
+    fn sample(number: u64, parent: Option<u64>, title: &str) -> IssueRow {
+        IssueRow {
+            number,
+            title: title.to_string(),
+            state: IssueState::Open,
+            parent_number: parent,
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
 
     #[test]
     fn nests_child_under_parent() {
-        let rows = vec![
-            sample(1, None, "parent"),
-            sample(2, Some(1), "child"),
-        ];
+        let rows = vec![sample(1, None, "parent"), sample(2, Some(1), "child")];
         let tree = build_tree(&rows);
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].issue.number, 1);

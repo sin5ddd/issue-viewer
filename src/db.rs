@@ -16,6 +16,7 @@ impl Cache {
         Ok(cache)
     }
 
+    #[cfg(test)]
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         let cache = Self { conn };
@@ -41,6 +42,11 @@ impl Cache {
                 repo TEXT NOT NULL,
                 last_synced_rfc3339 TEXT NOT NULL,
                 PRIMARY KEY (owner, repo)
+            );
+            CREATE TABLE IF NOT EXISTS session (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                owner TEXT NOT NULL,
+                repo TEXT NOT NULL
             );
             ",
         )?;
@@ -102,11 +108,13 @@ impl Cache {
     }
 
     pub fn last_synced(&self, owner: &str, repo: &str) -> Result<Option<String>> {
-        self.conn.query_row(
-            "SELECT last_synced_rfc3339 FROM sync_meta WHERE owner = ?1 AND repo = ?2",
-            rusqlite::params![owner, repo],
-            |row| row.get(0),
-        ).optional()
+        self.conn
+            .query_row(
+                "SELECT last_synced_rfc3339 FROM sync_meta WHERE owner = ?1 AND repo = ?2",
+                rusqlite::params![owner, repo],
+                |row| row.get(0),
+            )
+            .optional()
     }
 
     pub fn set_last_synced(&self, owner: &str, repo: &str, ts: &str) -> Result<()> {
@@ -115,6 +123,28 @@ impl Cache {
              ON CONFLICT(owner, repo) DO UPDATE SET last_synced_rfc3339 = excluded.last_synced_rfc3339",
             rusqlite::params![owner, repo, ts],
         )?;
+        Ok(())
+    }
+
+    pub fn last_repo(&self) -> Result<Option<(String, String)>> {
+        self.conn
+            .query_row("SELECT owner, repo FROM session WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+    }
+
+    pub fn set_last_repo(&self, owner: &str, repo: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO session (id, owner, repo) VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, repo = excluded.repo",
+            rusqlite::params![owner, repo],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_last_repo(&self) -> Result<()> {
+        self.conn.execute("DELETE FROM session", [])?;
         Ok(())
     }
 }
@@ -141,7 +171,10 @@ mod tests {
             .unwrap();
         let got = cache.list_issues("acme", "app").unwrap();
         assert_eq!(got.len(), 2);
-        assert_eq!(got.iter().find(|r| r.number == 2).unwrap().parent_number, Some(1));
+        assert_eq!(
+            got.iter().find(|r| r.number == 2).unwrap().parent_number,
+            Some(1)
+        );
     }
 
     #[test]
@@ -158,10 +191,25 @@ mod tests {
     fn last_synced_roundtrip() {
         let cache = Cache::open_memory().unwrap();
         assert_eq!(cache.last_synced("acme", "app").unwrap(), None);
-        cache.set_last_synced("acme", "app", "2026-09-19T00:00:00Z").unwrap();
+        cache
+            .set_last_synced("acme", "app", "2026-09-19T00:00:00Z")
+            .unwrap();
         assert_eq!(
             cache.last_synced("acme", "app").unwrap().as_deref(),
             Some("2026-09-19T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn last_repo_roundtrip_until_cleared() {
+        let cache = Cache::open_memory().unwrap();
+        assert_eq!(cache.last_repo().unwrap(), None);
+        cache.set_last_repo("acme", "app").unwrap();
+        assert_eq!(
+            cache.last_repo().unwrap(),
+            Some(("acme".into(), "app".into()))
+        );
+        cache.clear_last_repo().unwrap();
+        assert_eq!(cache.last_repo().unwrap(), None);
     }
 }

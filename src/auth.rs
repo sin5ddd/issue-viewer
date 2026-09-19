@@ -16,6 +16,7 @@ pub struct TokenResponse {
     pub interval: Option<u64>,
 }
 
+#[cfg(test)]
 pub fn parse_device_code(json: &str) -> Result<DeviceCode, serde_json::Error> {
     serde_json::from_str(json)
 }

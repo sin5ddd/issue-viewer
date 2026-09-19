@@ -3,16 +3,14 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::auth::{
-    is_placeholder_client_id, poll_token, request_device_code, try_gh_cli_token,
-};
+use crate::auth::{is_placeholder_client_id, poll_token, request_device_code, try_gh_cli_token};
 use crate::config::{GITHUB_CLIENT_ID, GITHUB_SCOPE};
 use crate::db::Cache;
 use crate::github::{GitHubClient, LiveClient, RepoRef};
 use crate::i18n::Lang;
 use crate::sync::sync_repo;
 use crate::token::{KeyringTokenStore, TokenStore};
-use crate::tree::{build_tree, TreeNode};
+use crate::tree::{TreeNode, build_tree};
 
 enum UiMsg {
     DeviceCode {
@@ -63,6 +61,13 @@ impl IssueViewerApp {
             rx,
         };
         if let Some(token) = token_value {
+            if let Ok(cache) = Cache::open(&Self::cache_path())
+                && let Ok(Some((owner, repo))) = cache.last_repo()
+            {
+                app.selected = Some((owner.clone(), repo.clone()));
+                app.reload_tree();
+                app.spawn_sync(token.clone(), owner, repo);
+            }
             app.spawn_list_repos(token);
         }
         app
@@ -269,6 +274,9 @@ impl eframe::App for IssueViewerApp {
                 }
                 if self.token_value.is_some() && ui.button(self.lang.t("sign_out")).clicked() {
                     self.tokens.clear();
+                    if let Ok(cache) = Cache::open(&Self::cache_path()) {
+                        let _ = cache.clear_last_repo();
+                    }
                     self.token_value = None;
                     self.repos.clear();
                     self.tree.clear();
@@ -321,17 +329,19 @@ impl eframe::App for IssueViewerApp {
                         });
                     if let Some((owner, name)) = picked {
                         self.selected = Some((owner.clone(), name.clone()));
+                        if let Ok(cache) = Cache::open(&Self::cache_path()) {
+                            let _ = cache.set_last_repo(&owner, &name);
+                        }
                         self.reload_tree();
                         if let Some(token) = self.token_value.clone() {
                             self.spawn_sync(token, owner, name);
                         }
                     }
-                    if ui.button(self.lang.t("refresh")).clicked() {
-                        if let (Some(token), Some((o, r))) =
+                    if ui.button(self.lang.t("refresh")).clicked()
+                        && let (Some(token), Some((o, r))) =
                             (self.token_value.clone(), self.selected.clone())
-                        {
-                            self.spawn_sync(token, o, r);
-                        }
+                    {
+                        self.spawn_sync(token, o, r);
                     }
                 });
                 if self.loading {

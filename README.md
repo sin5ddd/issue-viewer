@@ -30,7 +30,8 @@ cargo run
 
 ## Data
 
-- Access token: OS keyring (`issue-viewer` / `github`), never stored in SQLite
+- Access token: OS keyring (`issue-viewer` / `github`), never stored in SQLite. Survives app restarts until **Sign out**.
+- Last selected repository: SQLite session row, cleared on sign-out
 - Issue cache: `cache.sqlite` under the user data directory (`issue-viewer`)
 
 ## Font
