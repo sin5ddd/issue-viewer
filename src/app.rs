@@ -3,7 +3,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use crate::auth::{is_placeholder_client_id, poll_token, request_device_code, try_gh_cli_token};
+use crate::auth::{
+    is_placeholder_client_id, poll_token, refresh_access_token, request_device_code,
+    try_gh_cli_token,
+};
 use crate::config::{GITHUB_CLIENT_ID, GITHUB_SCOPE};
 use crate::db::{Cache, UiLayout};
 use crate::filter::{self, SortDir, SortKey};
@@ -11,7 +14,10 @@ use crate::github::{GitHubClient, LiveClient, RepoRef};
 use crate::i18n::Lang;
 use crate::model::IssueRow;
 use crate::sync::sync_repo;
-use crate::token::{KeyringTokenStore, TokenStore};
+use crate::token::{
+    KeyringTokenStore, StoredAuth, TokenStore, UnauthorizedAction, decode_stored_auth,
+    encode_stored_auth, expires_at_from_ttl, on_unauthorized, should_refresh,
+};
 use crate::tree::{TreeNode, build_tree, focus_tree};
 
 enum UiMsg {
@@ -19,7 +25,17 @@ enum UiMsg {
         user_code: String,
         verification_uri: String,
     },
-    LoggedIn(String),
+    LoggedIn {
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_in: Option<u64>,
+    },
+    Refreshed {
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_in: Option<u64>,
+    },
+    RefreshFailed,
     Repos(Vec<RepoRef>),
     SyncDone {
         remaining: Option<u32>,
@@ -37,6 +53,9 @@ pub struct IssueViewerApp {
     lang: Lang,
     tokens: KeyringTokenStore,
     token_value: Option<String>,
+    refresh_token: Option<String>,
+    access_expires_at: Option<i64>,
+    refreshing: bool,
     user_code: Option<String>,
     verification_uri: Option<String>,
     repos: Vec<RepoRef>,
@@ -65,11 +84,17 @@ impl IssueViewerApp {
         crate::fonts::install(&cc.egui_ctx);
         let (tx, rx) = mpsc::channel();
         let tokens = KeyringTokenStore;
-        let token_value = tokens.load();
+        let stored = tokens.load().map(|raw| decode_stored_auth(&raw));
+        let token_value = stored.as_ref().map(|s| s.access_token.clone());
+        let refresh_token = stored.as_ref().and_then(|s| s.refresh_token.clone());
+        let access_expires_at = stored.as_ref().and_then(|s| s.access_expires_at);
         let mut app = Self {
             lang: Lang::detect(),
             tokens,
             token_value: token_value.clone(),
+            refresh_token,
+            access_expires_at,
+            refreshing: false,
             user_code: None,
             verification_uri: None,
             repos: Vec::new(),
@@ -96,15 +121,22 @@ impl IssueViewerApp {
             rx,
         };
         if let Some(token) = token_value {
-            if let Ok(cache) = Cache::open(&Self::cache_path())
-                && let Ok(Some((owner, repo, issue))) = cache.last_repo()
-            {
-                app.selected = Some((owner.clone(), repo.clone()));
-                app.selected_issue = issue;
-                app.reload_tree();
-                app.spawn_sync(token.clone(), owner, repo);
+            let expired = stored
+                .as_ref()
+                .is_some_and(|auth| should_refresh(auth, chrono::Utc::now().timestamp()));
+            if expired {
+                app.spawn_refresh();
+            } else {
+                if let Ok(cache) = Cache::open(&Self::cache_path())
+                    && let Ok(Some((owner, repo, issue))) = cache.last_repo()
+                {
+                    app.selected = Some((owner.clone(), repo.clone()));
+                    app.selected_issue = issue;
+                    app.reload_tree();
+                    app.spawn_sync(token.clone(), owner, repo);
+                }
+                app.spawn_list_repos(token);
             }
-            app.spawn_list_repos(token);
         }
         app
     }
@@ -136,7 +168,11 @@ impl IssueViewerApp {
         thread::spawn(move || {
             if is_placeholder_client_id(GITHUB_CLIENT_ID) {
                 if let Some(token) = try_gh_cli_token() {
-                    let _ = tx.send(UiMsg::LoggedIn(token));
+                    let _ = tx.send(UiMsg::LoggedIn {
+                        access_token: token,
+                        refresh_token: None,
+                        expires_in: None,
+                    });
                     return;
                 }
                 let _ = tx.send(UiMsg::Error("need_oauth_app".into()));
@@ -166,7 +202,11 @@ impl IssueViewerApp {
                     }
                 };
                 if let Some(token) = resp.access_token {
-                    let _ = tx.send(UiMsg::LoggedIn(token));
+                    let _ = tx.send(UiMsg::LoggedIn {
+                        access_token: token,
+                        refresh_token: resp.refresh_token,
+                        expires_in: resp.expires_in,
+                    });
                     return;
                 }
                 match resp.error.as_deref() {
@@ -279,11 +319,19 @@ impl IssueViewerApp {
                     self.verification_uri = Some(verification_uri);
                     self.loading = false;
                 }
-                UiMsg::LoggedIn(token) => {
-                    self.tokens.save(&token);
-                    self.token_value = Some(token.clone());
+                UiMsg::LoggedIn {
+                    access_token,
+                    refresh_token,
+                    expires_in,
+                } => {
+                    self.store_session(access_token, refresh_token, expires_in);
                     self.user_code = None;
-                    self.spawn_list_repos(token);
+                    if self.status == "auth required" {
+                        self.status.clear();
+                    }
+                    if let Some(token) = self.token_value.clone() {
+                        self.spawn_list_repos(token);
+                    }
                 }
                 UiMsg::Repos(repos) => {
                     self.repos = repos;
@@ -298,13 +346,94 @@ impl IssueViewerApp {
                     self.status.clear();
                     self.reload_tree();
                 }
+                UiMsg::Refreshed {
+                    access_token,
+                    refresh_token,
+                    expires_in,
+                } => {
+                    self.refreshing = false;
+                    self.store_session(access_token, refresh_token, expires_in);
+                    self.status.clear();
+                    self.retry_after_refresh();
+                }
+                UiMsg::RefreshFailed => {
+                    self.refreshing = false;
+                    self.loading = false;
+                    self.syncing = false;
+                    self.status = "auth required".into();
+                }
                 UiMsg::Error(e) => {
                     self.syncing = false;
                     self.loading = false;
+                    self.refreshing = false;
                     self.status = e;
                 }
             }
         }
+    }
+
+    fn store_session(
+        &mut self,
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_in: Option<u64>,
+    ) {
+        let access_expires_at = expires_at_from_ttl(chrono::Utc::now().timestamp(), expires_in);
+        let auth = StoredAuth {
+            access_token: access_token.clone(),
+            refresh_token,
+            access_expires_at,
+        };
+        self.tokens.save(&encode_stored_auth(&auth));
+        self.token_value = Some(access_token);
+        self.refresh_token = auth.refresh_token;
+        self.access_expires_at = auth.access_expires_at;
+    }
+
+    fn has_refresh_token(&self) -> bool {
+        self.refresh_token.as_deref().is_some_and(|s| !s.is_empty())
+    }
+
+    fn spawn_refresh(&mut self) {
+        let Some(refresh_token) = self.refresh_token.clone().filter(|s| !s.is_empty()) else {
+            self.status = "auth required".into();
+            return;
+        };
+        if self.refreshing {
+            return;
+        }
+        self.refreshing = true;
+        self.loading = true;
+        self.status.clear();
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let http = reqwest::blocking::Client::new();
+            match refresh_access_token(&http, GITHUB_CLIENT_ID, &refresh_token) {
+                Ok(resp) if resp.access_token.is_some() => {
+                    let _ = tx.send(UiMsg::Refreshed {
+                        access_token: resp.access_token.unwrap(),
+                        refresh_token: resp.refresh_token,
+                        expires_in: resp.expires_in,
+                    });
+                }
+                Ok(_) => {
+                    let _ = tx.send(UiMsg::RefreshFailed);
+                }
+                Err(e) => {
+                    let _ = tx.send(UiMsg::Error(e.to_string()));
+                }
+            }
+        });
+    }
+
+    fn retry_after_refresh(&mut self) {
+        let Some(token) = self.token_value.clone() else {
+            return;
+        };
+        if let Some((owner, repo)) = self.selected.clone() {
+            self.spawn_sync(token.clone(), owner, repo);
+        }
+        self.spawn_list_repos(token);
     }
 
     fn show_tree(
@@ -480,6 +609,9 @@ impl eframe::App for IssueViewerApp {
                         let _ = cache.clear_last_repo();
                     }
                     self.token_value = None;
+                    self.refresh_token = None;
+                    self.access_expires_at = None;
+                    self.refreshing = false;
                     self.repos.clear();
                     self.tree.clear();
                     self.all_rows.clear();
