@@ -25,6 +25,7 @@ This app is a lightweight desktop viewer: sign in with GitHub OAuth, pick a repo
 - Selecting an issue reads the cached body. The app does not call a per-issue GitHub detail API on select or refresh.
 - On open, the app draws the SQLite tree immediately, then syncs from GitHub in the background when the network is available. The UI shows last-synced time. The user can refresh manually. Only one issue sync runs at a time.
 - The OAuth token is not stored in the SQLite issue database in plaintext. It is kept in the OS keyring until the user signs out, so a restart does not ask for login again.
+- If the OAuth App has expiring user tokens enabled, the access token expires after eight hours. The app stores the device-flow refresh token in the same OS keyring entry and renews the access token without showing Sign in. A refresh does not use a client secret. After an upgrade from a build that stored only the access token, the user signs in once so a refresh token can be issued. Sign out still deletes the keyring entry. A failed refresh (revoked token, or a refresh token unused for six months) shows the re-login prompt and leaves the cached tree on screen.
 - Children nest under their parent. Deeper sub-issues nest further. Rows can expand and collapse.
 - Each row shows at least issue number, title, and open/closed.
 - Choosing a row opens that GitHub issue in the default browser.

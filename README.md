@@ -35,7 +35,8 @@ Linux needs the usual desktop libraries (GTK 3 / X11). If the binary fails to st
 
 ## Data
 
-- Access token: OS keyring (`issue-viewer` / `github`), never stored in SQLite. Survives app restarts until **Sign out**.
+- Access token and refresh token: OS keyring (`issue-viewer` / `github`), never stored in SQLite. Survives app restarts until **Sign out**.
+- If the OAuth App optional feature **Expire user authorization tokens** is on, GitHub expires the access token after 8 hours. The app refreshes it silently. That is a GitHub setting, not a missing "remember me" checkbox in this app. Turning the feature off is optional; this app does not require it, and it does not extend tokens that were already issued. Sign in once after upgrading to a build that stores refresh tokens.
 - Last selected repository and issue, plus window/pane layout: SQLite under the user data directory (`issue-viewer`)
 - Issue cache: `cache.sqlite` in that same directory
 
@@ -52,4 +53,4 @@ cargo run --release
 
 Tagged `v*` pushes build the three binaries and publish a GitHub Release (see `.github/workflows/release.yml`).
 
-To change the compiled OAuth App, edit `src/config.rs` (`GITHUB_CLIENT_ID`). Create an OAuth App at https://github.com/settings/applications/new, enable **Device Flow**, request the `repo` scope.
+To change the compiled OAuth App, edit `src/config.rs` (`GITHUB_CLIENT_ID`). Create an OAuth App at https://github.com/settings/applications/new, enable **Device Flow**, request the `repo` scope. Leave **Expire user authorization tokens** either on or off. Do not add a client secret to the binary. Do not add the `offline_access` scope.
