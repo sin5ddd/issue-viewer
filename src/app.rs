@@ -365,8 +365,19 @@ impl IssueViewerApp {
                 UiMsg::Error(e) => {
                     self.syncing = false;
                     self.loading = false;
-                    self.refreshing = false;
-                    self.status = e;
+                    if e == "auth required" {
+                        match on_unauthorized(self.has_refresh_token(), self.refreshing) {
+                            UnauthorizedAction::StartRefresh => self.spawn_refresh(),
+                            UnauthorizedAction::IgnoreStale => {}
+                            UnauthorizedAction::Relogin => {
+                                self.refreshing = false;
+                                self.status = e;
+                            }
+                        }
+                    } else {
+                        self.refreshing = false;
+                        self.status = e;
+                    }
                 }
             }
         }
