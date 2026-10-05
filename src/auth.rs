@@ -90,6 +90,30 @@ pub fn poll_token(
     resp.json()
 }
 
+/// Form fields for device-flow refresh. `client_secret` is intentionally absent:
+/// GitHub requires it only when the token was not issued by device flow.
+pub fn refresh_form(client_id: &str, refresh_token: &str) -> [(&'static str, String); 3] {
+    [
+        ("client_id", client_id.to_string()),
+        ("grant_type", "refresh_token".to_string()),
+        ("refresh_token", refresh_token.to_string()),
+    ]
+}
+
+pub fn refresh_access_token(
+    http: &reqwest::blocking::Client,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<TokenResponse, reqwest::Error> {
+    let form = refresh_form(client_id, refresh_token);
+    let resp = http
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .form(&form)
+        .send()?;
+    resp.json()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +162,14 @@ mod tests {
         assert_eq!(t.refresh_token.as_deref(), Some("ghr_test"));
         assert_eq!(t.expires_in, Some(28800));
         assert_eq!(t.refresh_token_expires_in, Some(15897600));
+    }
+
+    #[test]
+    fn refresh_form_omits_client_secret() {
+        let form = refresh_form("client-id", "ghr_test");
+        let keys: Vec<&str> = form.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, ["client_id", "grant_type", "refresh_token"]);
+        assert_eq!(form[1].1, "refresh_token");
+        assert!(form.iter().all(|(k, _)| *k != "client_secret"));
     }
 }
