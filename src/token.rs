@@ -44,6 +44,31 @@ pub fn should_refresh(auth: &StoredAuth, now_unix: i64) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnauthorizedAction {
+    StartRefresh,
+    /// A refresh is already in flight. This 401 is from the request that failed first.
+    IgnoreStale,
+    Relogin,
+}
+
+/// `refresh_in_flight` is true only while the refresh HTTP call is running.
+/// The refresh worker must send `RefreshFailed`, not another unauthorized, so this
+/// function is not used to interpret refresh failure.
+pub fn on_unauthorized(has_refresh_token: bool, refresh_in_flight: bool) -> UnauthorizedAction {
+    if refresh_in_flight {
+        if has_refresh_token {
+            UnauthorizedAction::IgnoreStale
+        } else {
+            UnauthorizedAction::Relogin
+        }
+    } else if has_refresh_token {
+        UnauthorizedAction::StartRefresh
+    } else {
+        UnauthorizedAction::Relogin
+    }
+}
+
 pub trait TokenStore {
     fn load(&self) -> Option<String>;
     fn save(&self, token: &str);
@@ -140,5 +165,19 @@ mod tests {
             access_expires_at: Some(10),
         };
         assert!(!should_refresh(&auth, 10_000));
+    }
+
+    #[test]
+    fn unauthorized_starts_one_refresh_then_relogin() {
+        assert_eq!(
+            on_unauthorized(true, false),
+            UnauthorizedAction::StartRefresh
+        );
+        assert_eq!(
+            on_unauthorized(true, true),
+            UnauthorizedAction::IgnoreStale
+        );
+        assert_eq!(on_unauthorized(false, false), UnauthorizedAction::Relogin);
+        assert_eq!(on_unauthorized(false, true), UnauthorizedAction::Relogin);
     }
 }
