@@ -14,6 +14,12 @@ pub struct TokenResponse {
     pub access_token: Option<String>,
     pub error: Option<String>,
     pub interval: Option<u64>,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub expires_in: Option<u64>,
+    #[serde(default)]
+    pub refresh_token_expires_in: Option<u64>,
 }
 
 #[cfg(test)]
@@ -120,5 +126,17 @@ mod tests {
             Some("gho_exampletoken")
         );
         assert!(parse_gh_auth_token_stdout("error: not logged in\n").is_none());
+    }
+
+    #[test]
+    fn expiring_device_token_includes_refresh() {
+        let t: TokenResponse = serde_json::from_str(
+            r#"{"access_token":"gho_test","expires_in":28800,"refresh_token":"ghr_test","refresh_token_expires_in":15897600,"token_type":"bearer","scope":"repo"}"#,
+        )
+        .unwrap();
+        assert_eq!(t.access_token.as_deref(), Some("gho_test"));
+        assert_eq!(t.refresh_token.as_deref(), Some("ghr_test"));
+        assert_eq!(t.expires_in, Some(28800));
+        assert_eq!(t.refresh_token_expires_in, Some(15897600));
     }
 }
