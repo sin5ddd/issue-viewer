@@ -10,6 +10,7 @@ mod github;
 mod i18n;
 mod md;
 mod model;
+mod status_bar;
 mod sync;
 mod theme;
 mod timefmt;

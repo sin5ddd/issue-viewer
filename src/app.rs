@@ -13,6 +13,7 @@ use crate::filter::{self, SortDir, SortKey};
 use crate::github::{GitHubClient, LiveClient, RepoRef};
 use crate::i18n::Lang;
 use crate::model::IssueRow;
+use crate::status_bar::status_bar;
 use crate::sync::sync_repo;
 use crate::token::{
     KeyringTokenStore, StoredAuth, TokenStore, UnauthorizedAction, decode_stored_auth,
@@ -594,6 +595,67 @@ impl IssueViewerApp {
         let n = self.selected_issue?;
         self.all_rows.iter().find(|r| r.number == n)
     }
+
+    fn show_status_bar(&mut self, ctx: &eframe::egui::Context) {
+        let model = status_bar(self.syncing, &self.status);
+        let lang = self.lang;
+        let signed_in = self.token_value.is_some();
+        eframe::egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_min_height(ui.spacing().interact_size.y);
+                if model.reloading {
+                    ui.label(lang.t("reloading"));
+                } else if self.loading {
+                    ui.label(lang.t("loading"));
+                }
+                if model.relogin {
+                    ui.colored_label(ui.visuals().error_fg_color, lang.t("relogin_required"));
+                    if signed_in
+                        && self.user_code.is_none()
+                        && ui
+                            .add_enabled(
+                                !self.loading,
+                                eframe::egui::Button::new(lang.t("sign_in")),
+                            )
+                            .clicked()
+                    {
+                        self.loading = true;
+                        self.spawn_login();
+                    }
+                }
+                if signed_in {
+                    if let Some(code) = self.user_code.clone() {
+                        ui.separator();
+                        ui.label(lang.t("user_code"));
+                        ui.strong(&code);
+                        if let Some(uri) = self.verification_uri.clone() {
+                            ui.hyperlink(uri);
+                        }
+                    }
+                }
+                ui.with_layout(
+                    eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+                    |ui| {
+                        if let Some(n) = self.rate_remaining {
+                            ui.label(format!("{}: {n}", lang.t("rate_remaining")));
+                        }
+                        if let Some(ts) = &self.last_synced {
+                            ui.label(format!(
+                                "{}: {}",
+                                lang.t("last_synced"),
+                                crate::timefmt::format_unix_local(ts)
+                            ));
+                        }
+                    },
+                );
+            });
+            if let Some(key) = model.notice_key {
+                ui.colored_label(ui.visuals().error_fg_color, lang.t(key));
+            } else if model.notice_raw {
+                ui.colored_label(ui.visuals().error_fg_color, &self.status);
+            }
+        });
+    }
 }
 
 impl eframe::App for IssueViewerApp {
@@ -628,6 +690,7 @@ impl eframe::App for IssueViewerApp {
                     self.all_rows.clear();
                     self.selected = None;
                     self.selected_issue = None;
+                    self.status.clear();
                 }
             });
             if self.token_value.is_some() {
@@ -715,31 +778,10 @@ impl eframe::App for IssueViewerApp {
                     }
                     self.rebuild_visible();
                 });
-                if self.loading {
-                    ui.label(self.lang.t("loading"));
-                }
-                if let Some(ts) = &self.last_synced {
-                    ui.label(format!(
-                        "{}: {}",
-                        self.lang.t("last_synced"),
-                        crate::timefmt::format_unix_local(ts)
-                    ));
-                }
-                if let Some(n) = self.rate_remaining {
-                    ui.label(format!("{}: {n}", self.lang.t("rate_remaining")));
-                }
-                if !self.status.is_empty() {
-                    let text = if self.status.contains("rate_limited") {
-                        self.lang.t("rate_limited")
-                    } else if self.status == "need_oauth_app" {
-                        self.lang.t("need_oauth_app")
-                    } else {
-                        self.status.as_str()
-                    };
-                    ui.colored_label(eframe::egui::Color32::RED, text);
-                }
             }
         });
+
+        self.show_status_bar(ctx);
 
         if self.token_value.is_none() {
             eframe::egui::CentralPanel::default().show(ctx, |ui| {
@@ -747,23 +789,12 @@ impl eframe::App for IssueViewerApp {
                     self.loading = true;
                     self.spawn_login();
                 }
-                if self.loading {
-                    ui.label(self.lang.t("loading"));
-                }
                 if let Some(code) = &self.user_code {
                     ui.label(self.lang.t("user_code"));
                     ui.heading(code);
                     if let Some(uri) = &self.verification_uri {
                         ui.hyperlink(uri);
                     }
-                }
-                if !self.status.is_empty() {
-                    let text = if self.status == "need_oauth_app" {
-                        self.lang.t("need_oauth_app")
-                    } else {
-                        self.status.as_str()
-                    };
-                    ui.colored_label(eframe::egui::Color32::RED, text);
                 }
             });
             ctx.request_repaint_after(Duration::from_millis(200));

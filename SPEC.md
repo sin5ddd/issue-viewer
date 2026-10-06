@@ -30,7 +30,7 @@ This app is a lightweight desktop viewer: sign in with GitHub OAuth, pick a repo
 - Each row shows at least issue number, title, and open/closed.
 - Choosing a row opens that GitHub issue in the default browser.
 - First release is read-only. The app does not create, edit, or close issues, and does not change parent/child links.
-- Loading and failure states are visible in the UI.
+- Loading and failure states are visible in the bottom status bar, not under the toolbar. Reload progress and a re-login prompt (expired or rejected token) stay there while the cached tree remains on screen.
 - UI chrome is available in Japanese and English from the first release. Default follows the OS locale when it is Japanese or English; otherwise English. The user can switch language in the app.
 - Japanese and other CJK in issue titles must render as real glyphs, not tofu. The app sets an explicit UI font from the first release: bundled **Noto Sans JP** (SIL OFL), registered in egui as the proportional family (with monospace kept for numbers/IDs if needed).
 

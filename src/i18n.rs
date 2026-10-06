@@ -62,6 +62,10 @@ impl Lang {
             (Lang::Ja, "related") => "関連",
             (Lang::En, "rate_limited") => "GitHub rate limit — showing cache",
             (Lang::Ja, "rate_limited") => "レート制限 — キャッシュを表示",
+            (Lang::En, "reloading") => "Reloading…",
+            (Lang::Ja, "reloading") => "再読み込み中…",
+            (Lang::En, "relogin_required") => "Sign in again",
+            (Lang::Ja, "relogin_required") => "再ログインが必要です",
             _ => key,
         }
     }
@@ -74,6 +78,14 @@ mod tests {
     #[test]
     fn ja_sign_in() {
         assert_eq!(Lang::Ja.t("sign_in"), "GitHub でサインイン");
+    }
+
+    #[test]
+    fn ja_relogin_and_reloading() {
+        assert_eq!(Lang::Ja.t("relogin_required"), "再ログインが必要です");
+        assert_eq!(Lang::Ja.t("reloading"), "再読み込み中…");
+        assert_eq!(Lang::En.t("relogin_required"), "Sign in again");
+        assert_eq!(Lang::En.t("reloading"), "Reloading…");
     }
 
     #[test]
