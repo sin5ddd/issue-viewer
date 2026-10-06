@@ -8,7 +8,10 @@ pub fn show(ui: &mut Ui, markdown: &str) {
     let mut is_code_block = false;
     let mut code = String::new();
 
-    let flush_para = |ui: &mut Ui, paragraph: &mut String, heading: &mut Option<HeadingLevel>, list_depth: usize| {
+    let flush_para = |ui: &mut Ui,
+                      paragraph: &mut String,
+                      heading: &mut Option<HeadingLevel>,
+                      list_depth: usize| {
         let text = paragraph.trim_end().to_string();
         paragraph.clear();
         if text.is_empty() {
@@ -68,9 +71,7 @@ pub fn show(ui: &mut Ui, markdown: &str) {
             }
             Event::End(TagEnd::CodeBlock) => {
                 is_code_block = false;
-                ui.add(
-                    egui::Label::new(RichText::new(code.trim_end()).monospace()).wrap(),
-                );
+                ui.add(egui::Label::new(RichText::new(code.trim_end()).monospace()).wrap());
                 code.clear();
             }
             Event::Start(Tag::Paragraph) => {}

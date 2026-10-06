@@ -2,7 +2,10 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 
 pub fn format_rfc3339_local(raw: &str) -> String {
     if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-        return dt.with_timezone(&Local).format("%Y-%m-%d %H:%M %Z").to_string();
+        return dt
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M %Z")
+            .to_string();
     }
     raw.to_string()
 }

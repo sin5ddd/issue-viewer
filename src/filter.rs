@@ -119,7 +119,14 @@ mod tests {
             row(1, "a", IssueState::Open, "1", "1"),
             row(2, "b", IssueState::Closed, "1", "1"),
         ];
-        let got = apply(&rows, "is:open", true, true, SortKey::Updated, SortDir::Desc);
+        let got = apply(
+            &rows,
+            "is:open",
+            true,
+            true,
+            SortKey::Updated,
+            SortDir::Desc,
+        );
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].number, 1);
     }
@@ -149,8 +156,20 @@ mod tests {
     #[test]
     fn updated_desc_orders_later_first() {
         let rows = vec![
-            row(1, "a", IssueState::Open, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
-            row(2, "b", IssueState::Open, "2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"),
+            row(
+                1,
+                "a",
+                IssueState::Open,
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:00:00Z",
+            ),
+            row(
+                2,
+                "b",
+                IssueState::Open,
+                "2026-01-01T00:00:00Z",
+                "2026-02-01T00:00:00Z",
+            ),
         ];
         let got = apply(&rows, "", true, false, SortKey::Updated, SortDir::Desc);
         assert_eq!(got[0].number, 2);
