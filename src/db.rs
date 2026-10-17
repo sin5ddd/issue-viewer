@@ -1,4 +1,4 @@
-use crate::model::{IssueRow, IssueState};
+use crate::model::{IssueComment, IssueRow, IssueState};
 use rusqlite::{Connection, OptionalExtension, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -20,6 +20,12 @@ impl Default for UiLayout {
     }
 }
 
+pub struct CachedComments {
+    pub comments: Vec<IssueComment>,
+    pub issue_updated_at: String,
+    pub truncated: bool,
+}
+
 pub struct Cache {
     conn: Connection,
 }
@@ -30,6 +36,7 @@ impl Cache {
             std::fs::create_dir_all(dir).ok();
         }
         let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let cache = Self { conn };
         cache.migrate()?;
         Ok(cache)
@@ -38,6 +45,7 @@ impl Cache {
     #[cfg(test)]
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let cache = Self { conn };
         cache.migrate()?;
         Ok(cache)
@@ -73,6 +81,27 @@ impl Cache {
                 window_h REAL NOT NULL,
                 left_w REAL NOT NULL,
                 right_w REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS issue_comments (
+                owner TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                issue_number INTEGER NOT NULL,
+                comment_id TEXT NOT NULL,
+                author TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                minimized INTEGER NOT NULL,
+                ord INTEGER NOT NULL,
+                PRIMARY KEY (owner, repo, issue_number, comment_id)
+            );
+            CREATE TABLE IF NOT EXISTS comment_sync (
+                owner TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                issue_number INTEGER NOT NULL,
+                issue_updated_at TEXT NOT NULL,
+                truncated INTEGER NOT NULL,
+                PRIMARY KEY (owner, repo, issue_number)
             );
             ",
         )?;
@@ -298,6 +327,107 @@ impl Cache {
         self.conn.execute("DELETE FROM session", [])?;
         Ok(())
     }
+
+    pub fn list_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<CachedComments>> {
+        let sync: Option<(String, i64)> = self
+            .conn
+            .query_row(
+                "SELECT issue_updated_at, truncated FROM comment_sync
+                 WHERE owner = ?1 AND repo = ?2 AND issue_number = ?3",
+                rusqlite::params![owner, repo, number as i64],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((issue_updated_at, truncated)) = sync else {
+            return Ok(None);
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT comment_id, author, body, created_at, updated_at, minimized
+             FROM issue_comments
+             WHERE owner = ?1 AND repo = ?2 AND issue_number = ?3
+             ORDER BY ord ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![owner, repo, number as i64], |row| {
+            let minimized: i64 = row.get(5)?;
+            Ok(IssueComment {
+                id: row.get(0)?,
+                author: row.get(1)?,
+                body: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                minimized: minimized != 0,
+            })
+        })?;
+        let comments = rows.collect::<Result<Vec<_>>>()?;
+        Ok(Some(CachedComments {
+            comments,
+            issue_updated_at,
+            truncated: truncated != 0,
+        }))
+    }
+
+    pub fn replace_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        issue_updated_at: &str,
+        truncated: bool,
+        comments: &[IssueComment],
+    ) -> Result<()> {
+        let mut sorted: Vec<&IssueComment> = comments.iter().collect();
+        sorted.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM issue_comments WHERE owner = ?1 AND repo = ?2 AND issue_number = ?3",
+            rusqlite::params![owner, repo, number as i64],
+        )?;
+        for (ord, comment) in sorted.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO issue_comments (
+                    owner, repo, issue_number, comment_id, author, body,
+                    created_at, updated_at, minimized, ord
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    owner,
+                    repo,
+                    number as i64,
+                    comment.id,
+                    comment.author,
+                    comment.body,
+                    comment.created_at,
+                    comment.updated_at,
+                    i64::from(comment.minimized),
+                    ord as i64,
+                ],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO comment_sync (owner, repo, issue_number, issue_updated_at, truncated)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(owner, repo, issue_number) DO UPDATE SET
+               issue_updated_at = excluded.issue_updated_at,
+               truncated = excluded.truncated",
+            rusqlite::params![
+                owner,
+                repo,
+                number as i64,
+                issue_updated_at,
+                i64::from(truncated),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -473,5 +603,65 @@ mod tests {
         };
         cache.set_ui_layout(&layout).unwrap();
         assert_eq!(cache.ui_layout().unwrap(), layout);
+    }
+
+    #[test]
+    fn replace_comments_sorts_and_drops_removed_ids() {
+        let cache = Cache::open_memory().unwrap();
+        assert!(cache.list_comments("acme", "app", 1).unwrap().is_none());
+        let late = IssueComment {
+            id: "b".into(),
+            author: "late".into(),
+            body: "later".into(),
+            created_at: "2026-02-01T00:00:00Z".into(),
+            updated_at: "2026-02-01T00:00:00Z".into(),
+            minimized: false,
+        };
+        let early = IssueComment {
+            id: "a".into(),
+            author: "early".into(),
+            body: "earlier".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            minimized: true,
+        };
+        cache
+            .replace_comments(
+                "acme",
+                "app",
+                1,
+                "2026-03-01T00:00:00Z",
+                false,
+                &[late, early],
+            )
+            .unwrap();
+        let got = cache.list_comments("acme", "app", 1).unwrap().unwrap();
+        assert_eq!(got.comments[0].id, "a");
+        assert!(got.comments[0].minimized);
+        assert_eq!(got.issue_updated_at, "2026-03-01T00:00:00Z");
+        assert!(!got.truncated);
+        cache
+            .replace_comments(
+                "acme",
+                "app",
+                1,
+                "2026-03-02T00:00:00Z",
+                true,
+                &[IssueComment {
+                    id: "a".into(),
+                    author: "early".into(),
+                    body: "only".into(),
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                    minimized: false,
+                }],
+            )
+            .unwrap();
+        let got = cache.list_comments("acme", "app", 1).unwrap().unwrap();
+        assert_eq!(got.comments.len(), 1);
+        assert_eq!(got.comments[0].id, "a");
+        assert!(got.comments.iter().all(|c| c.id != "b"));
+        assert!(got.truncated);
+        assert_eq!(got.issue_updated_at, "2026-03-02T00:00:00Z");
     }
 }

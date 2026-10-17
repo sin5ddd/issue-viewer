@@ -42,3 +42,14 @@ pub enum IssueState {
     Open,
     Closed,
 }
+
+/// One GitHub issue comment. Not part of `IssueRow`: the tree keeps every issue in memory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssueComment {
+    pub id: String,
+    pub author: String,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub minimized: bool,
+}

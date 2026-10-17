@@ -1,4 +1,4 @@
-use crate::model::{IssueFieldValue, IssueLabel, IssueRow, IssueState, IssueTypeRef};
+use crate::model::{IssueComment, IssueFieldValue, IssueLabel, IssueRow, IssueState, IssueTypeRef};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +141,142 @@ pub fn rows_from_graphql_json(json: &str) -> Result<IssuePage, serde_json::Error
         end_cursor: issues.page_info.end_cursor,
         rate_remaining: remaining,
         rate_cost: cost,
+    })
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CommentPage {
+    pub comments: Vec<IssueComment>,
+    pub has_next: bool,
+    pub end_cursor: Option<String>,
+    pub rate_remaining: Option<u32>,
+    pub missing_issue: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IssueComments {
+    pub comments: Vec<IssueComment>,
+    pub truncated: bool,
+    pub rate_remaining: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlCommentResponse {
+    data: Option<GqlCommentData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlCommentData {
+    #[serde(rename = "rateLimit")]
+    rate_limit: Option<GqlRate>,
+    #[serde(default)]
+    repository: Option<GqlCommentRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlCommentRepo {
+    #[serde(default)]
+    issue: Option<GqlCommentIssue>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlCommentIssue {
+    #[serde(default)]
+    comments: Option<GqlCommentConn>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlCommentConn {
+    #[serde(rename = "pageInfo", default)]
+    page_info: Option<GqlPage>,
+    #[serde(default)]
+    nodes: Option<Vec<Option<GqlCommentNode>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlCommentNode {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    author: Option<GqlAuthor>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(rename = "createdAt", default)]
+    created_at: Option<String>,
+    #[serde(rename = "updatedAt", default)]
+    updated_at: Option<String>,
+    #[serde(rename = "isMinimized", default)]
+    is_minimized: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GqlAuthor {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+pub fn comments_from_graphql_json(json: &str) -> Result<CommentPage, serde_json::Error> {
+    let parsed: GqlCommentResponse = serde_json::from_str(json)?;
+    let rate_remaining = parsed
+        .data
+        .as_ref()
+        .and_then(|d| d.rate_limit.as_ref())
+        .map(|r| r.remaining);
+    let Some(issue) = parsed
+        .data
+        .as_ref()
+        .and_then(|d| d.repository.as_ref())
+        .and_then(|r| r.issue.as_ref())
+    else {
+        return Ok(CommentPage {
+            rate_remaining,
+            missing_issue: true,
+            ..CommentPage::default()
+        });
+    };
+    let Some(conn) = issue.comments.as_ref() else {
+        return Ok(CommentPage {
+            rate_remaining,
+            ..CommentPage::default()
+        });
+    };
+    let comments = conn
+        .nodes
+        .iter()
+        .flatten()
+        .flatten()
+        .filter_map(|n| {
+            let id = n.id.clone().unwrap_or_default();
+            if id.is_empty() {
+                return None;
+            }
+            let author = n
+                .author
+                .as_ref()
+                .and_then(|a| a.login.clone())
+                .filter(|login| !login.is_empty())
+                .unwrap_or_default();
+            Some(IssueComment {
+                id,
+                author,
+                body: n.body.clone().unwrap_or_default(),
+                created_at: n.created_at.clone().unwrap_or_default(),
+                updated_at: n.updated_at.clone().unwrap_or_default(),
+                minimized: n.is_minimized,
+            })
+        })
+        .collect();
+    let (has_next, end_cursor) = conn
+        .page_info
+        .as_ref()
+        .map(|p| (p.has_next_page, p.end_cursor.clone()))
+        .unwrap_or((false, None));
+    Ok(CommentPage {
+        comments,
+        has_next,
+        end_cursor,
+        rate_remaining,
+        missing_issue: false,
     })
 }
 
@@ -361,6 +497,34 @@ pub trait GitHubClient {
     ) -> Result<IssuePage, GitHubError>;
 }
 
+const COMMENT_PAGE_SIZE: usize = 100;
+const COMMENT_MAX_PAGES: usize = 5;
+
+fn comments_query() -> String {
+    format!(
+        r#"
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {{
+  rateLimit {{ remaining cost }}
+  repository(owner: $owner, name: $name) {{
+    issue(number: $number) {{
+      comments(first: {COMMENT_PAGE_SIZE}, after: $cursor) {{
+        pageInfo {{ hasNextPage endCursor }}
+        nodes {{
+          id
+          author {{ login }}
+          body
+          createdAt
+          updatedAt
+          isMinimized
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+    )
+}
+
 pub struct LiveClient {
     pub token: String,
     http: reqwest::blocking::Client,
@@ -407,6 +571,93 @@ impl LiveClient {
             return Err(GitHubError::Http("rate_limited".into()));
         }
         resp.text().map_err(|e| GitHubError::Http(e.to_string()))
+    }
+
+    fn post_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        cursor: Option<&str>,
+    ) -> Result<String, GitHubError> {
+        let body = serde_json::json!({
+            "query": comments_query(),
+            "variables": {
+                "owner": owner,
+                "name": repo,
+                "number": number as i64,
+                "cursor": cursor,
+            },
+        });
+        let resp = self
+            .http
+            .post("https://api.github.com/graphql")
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("User-Agent", "issue-viewer")
+            .json(&body)
+            .send()
+            .map_err(|e| GitHubError::Http(e.to_string()))?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(GitHubError::Auth);
+        }
+        if resp.status() == reqwest::StatusCode::FORBIDDEN {
+            return Err(GitHubError::Http("rate_limited".into()));
+        }
+        resp.text().map_err(|e| GitHubError::Http(e.to_string()))
+    }
+
+    pub fn fetch_issue_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<IssueComments, GitHubError> {
+        let mut comments = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut rate_remaining = None;
+        let mut truncated = false;
+        for page_i in 0..COMMENT_MAX_PAGES {
+            let text = self.post_comments(owner, repo, number, cursor.as_deref())?;
+            if graphql_issue_data_missing(&text) {
+                return Err(GitHubError::Http(graphql_error_summary(&text)));
+            }
+            let page =
+                comments_from_graphql_json(&text).map_err(|e| GitHubError::Http(e.to_string()))?;
+            if page.rate_remaining.is_some() {
+                rate_remaining = page.rate_remaining;
+            }
+            if page.missing_issue {
+                if page_i == 0 {
+                    return Ok(IssueComments {
+                        truncated: false,
+                        rate_remaining,
+                        ..IssueComments::default()
+                    });
+                }
+                break;
+            }
+            let has_next = page.has_next && page.end_cursor.is_some();
+            let next = page.end_cursor;
+            comments.extend(page.comments);
+            if !has_next {
+                break;
+            }
+            if page_i + 1 == COMMENT_MAX_PAGES {
+                truncated = true;
+                break;
+            }
+            cursor = next;
+        }
+        comments.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(IssueComments {
+            comments,
+            truncated,
+            rate_remaining,
+        })
     }
 }
 
@@ -619,5 +870,84 @@ mod tests {
         assert!(!graphql_issue_data_missing(
             r#"{"data":{"repository":{"issues":{}}}}"#
         ));
+    }
+    #[test]
+    fn comments_from_graphql_json_keeps_page_order() {
+        let json = r#"{
+  "data": {
+    "rateLimit": { "remaining": 42, "cost": 1 },
+    "repository": {
+      "issue": {
+        "comments": {
+          "pageInfo": { "hasNextPage": true, "endCursor": "c1" },
+          "nodes": [
+            {
+              "id": "b",
+              "author": null,
+              "body": "later",
+              "createdAt": "2026-02-01T00:00:00Z",
+              "updatedAt": "2026-02-02T00:00:00Z",
+              "isMinimized": true
+            },
+            {
+              "id": "a",
+              "author": { "login": "octocat" },
+              "body": "earlier",
+              "createdAt": "2026-01-01T00:00:00Z",
+              "updatedAt": "2026-01-01T00:00:00Z",
+              "isMinimized": false
+            }
+          ]
+        }
+      }
+    }
+  }
+}"#;
+        let page = comments_from_graphql_json(json).unwrap();
+        assert!(page.has_next);
+        assert_eq!(page.end_cursor, Some("c1".into()));
+        assert_eq!(page.rate_remaining, Some(42));
+        assert!(!page.missing_issue);
+        assert_eq!(page.comments.len(), 2);
+        assert_eq!(page.comments[0].id, "b");
+        assert_eq!(page.comments[0].author, "");
+        assert!(page.comments[0].minimized);
+        assert_eq!(page.comments[0].updated_at, "2026-02-02T00:00:00Z");
+        assert_eq!(page.comments[1].author, "octocat");
+        assert!(!page.comments[1].minimized);
+    }
+
+    #[test]
+    fn comments_missing_issue_is_ok() {
+        let json = r#"{"data":{"repository":{"issue":null}}}"#;
+        let page = comments_from_graphql_json(json).unwrap();
+        assert!(page.missing_issue);
+        assert!(page.comments.is_empty());
+    }
+
+    #[test]
+    fn comments_drop_null_nodes_and_empty_ids() {
+        let json = r#"{
+          "data": {
+            "repository": {
+              "issue": {
+                "comments": {
+                  "nodes": [null, {"id": "", "body": "x"}, {"id": "ok", "body": null, "author": {"login": ""}}]
+                }
+              }
+            }
+          }
+        }"#;
+        let page = comments_from_graphql_json(json).unwrap();
+        assert!(!page.missing_issue);
+        assert_eq!(page.comments.len(), 1);
+        assert_eq!(page.comments[0].id, "ok");
+        assert_eq!(page.comments[0].author, "");
+        assert_eq!(page.comments[0].body, "");
+        assert!(!page.comments[0].minimized);
+        let null_nodes = r#"{"data":{"repository":{"issue":{"comments":{"nodes":null}}}}}"#;
+        let page = comments_from_graphql_json(null_nodes).unwrap();
+        assert!(!page.missing_issue);
+        assert!(page.comments.is_empty());
     }
 }

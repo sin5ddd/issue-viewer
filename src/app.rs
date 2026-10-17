@@ -12,7 +12,7 @@ use crate::db::{Cache, UiLayout};
 use crate::filter::{self, SortDir, SortKey};
 use crate::github::{GitHubClient, LiveClient, RepoRef};
 use crate::i18n::Lang;
-use crate::model::IssueRow;
+use crate::model::{IssueComment, IssueRow};
 use crate::status_bar::status_bar;
 use crate::sync::sync_repo;
 use crate::token::{
@@ -42,6 +42,18 @@ enum UiMsg {
         remaining: Option<u32>,
     },
     Error(String),
+    CommentsReady {
+        owner: String,
+        repo: String,
+        number: u64,
+        rate_remaining: Option<u32>,
+    },
+    CommentsFailed {
+        owner: String,
+        repo: String,
+        number: u64,
+        error: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,6 +87,13 @@ pub struct IssueViewerApp {
     status: String,
     loading: bool,
     syncing: bool,
+    comments: Vec<IssueComment>,
+    comments_for: Option<(String, String, u64)>,
+    comments_issue_updated_at: Option<String>,
+    comments_truncated: bool,
+    comments_loading: bool,
+    comments_inflight: Option<(String, String, u64)>,
+    comments_error: String,
     layout: UiLayout,
     tx: Sender<UiMsg>,
     rx: Receiver<UiMsg>,
@@ -114,6 +133,13 @@ impl IssueViewerApp {
             status: String::new(),
             loading: false,
             syncing: false,
+            comments: Vec::new(),
+            comments_for: None,
+            comments_issue_updated_at: None,
+            comments_truncated: false,
+            comments_loading: false,
+            comments_inflight: None,
+            comments_error: String::new(),
             layout: Cache::open(&Self::cache_path())
                 .ok()
                 .and_then(|c| c.ui_layout().ok())
@@ -134,6 +160,7 @@ impl IssueViewerApp {
                     app.selected = Some((owner.clone(), repo.clone()));
                     app.selected_issue = issue;
                     app.reload_tree();
+                    app.ensure_comments();
                     app.spawn_sync(token.clone(), owner, repo);
                 }
                 app.spawn_list_repos(token);
@@ -309,6 +336,130 @@ impl IssueViewerApp {
         }
     }
 
+    fn clear_comments(&mut self) {
+        self.comments.clear();
+        self.comments_for = None;
+        self.comments_issue_updated_at = None;
+        self.comments_truncated = false;
+        self.comments_loading = false;
+        self.comments_error.clear();
+    }
+
+    fn ensure_comments(&mut self) {
+        let Some((owner, repo)) = self.selected.clone() else {
+            self.clear_comments();
+            return;
+        };
+        let Some(number) = self.selected_issue else {
+            self.clear_comments();
+            return;
+        };
+        let key = (owner.clone(), repo.clone(), number);
+        if self.comments_for.as_ref() != Some(&key) {
+            self.comments.clear();
+            self.comments_error.clear();
+            self.comments_truncated = false;
+            self.comments_issue_updated_at = None;
+            self.comments_for = Some(key.clone());
+        }
+        match Cache::open(&Self::cache_path()) {
+            Ok(cache) => match cache.list_comments(&owner, &repo, number) {
+                Ok(Some(cached)) => {
+                    self.comments = cached.comments;
+                    self.comments_truncated = cached.truncated;
+                    self.comments_issue_updated_at = Some(cached.issue_updated_at);
+                }
+                Ok(None) => {}
+                Err(e) => self.comments_error = e.to_string(),
+            },
+            Err(e) => self.comments_error = e.to_string(),
+        }
+        let Some(updated_at) = self.selected_row().map(|row| row.updated_at.clone()) else {
+            self.comments_loading = false;
+            return;
+        };
+        if self.comments_issue_updated_at.as_deref() == Some(updated_at.as_str()) {
+            self.comments_loading = false;
+            return;
+        }
+        let Some(token) = self.token_value.clone() else {
+            self.comments_loading = false;
+            if self.comments.is_empty() && self.comments_error.is_empty() {
+                self.comments_error = "offline".into();
+            }
+            return;
+        };
+        if self.comments_inflight.as_ref() == Some(&key) {
+            self.comments_loading = true;
+            return;
+        }
+        self.spawn_comment_fetch(token, owner, repo, number, updated_at);
+    }
+
+    fn spawn_comment_fetch(
+        &mut self,
+        token: String,
+        owner: String,
+        repo: String,
+        number: u64,
+        issue_updated_at: String,
+    ) {
+        self.comments_loading = true;
+        self.comments_inflight = Some((owner.clone(), repo.clone(), number));
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let client = LiveClient::new(token);
+            match client.fetch_issue_comments(&owner, &repo, number) {
+                Ok(page) => match Cache::open(&IssueViewerApp::cache_path()) {
+                    Ok(cache) => match cache.replace_comments(
+                        &owner,
+                        &repo,
+                        number,
+                        &issue_updated_at,
+                        page.truncated,
+                        &page.comments,
+                    ) {
+                        Ok(()) => {
+                            let _ = tx.send(UiMsg::CommentsReady {
+                                owner,
+                                repo,
+                                number,
+                                rate_remaining: page.rate_remaining,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(UiMsg::CommentsFailed {
+                                owner,
+                                repo,
+                                number,
+                                error: e.to_string(),
+                            });
+                        }
+                    },
+                    Err(e) => {
+                        let _ = tx.send(UiMsg::CommentsFailed {
+                            owner,
+                            repo,
+                            number,
+                            error: e.to_string(),
+                        });
+                    }
+                },
+                Err(crate::github::GitHubError::Auth) => {
+                    let _ = tx.send(UiMsg::Error("auth required".into()));
+                }
+                Err(e) => {
+                    let _ = tx.send(UiMsg::CommentsFailed {
+                        owner,
+                        repo,
+                        number,
+                        error: e.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
     fn pump_messages(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
@@ -346,6 +497,7 @@ impl IssueViewerApp {
                     self.rate_remaining = remaining;
                     self.status.clear();
                     self.reload_tree();
+                    self.ensure_comments();
                 }
                 UiMsg::Refreshed {
                     access_token,
@@ -367,6 +519,8 @@ impl IssueViewerApp {
                     self.syncing = false;
                     self.loading = false;
                     if e == "auth required" {
+                        self.comments_loading = false;
+                        self.comments_inflight = None;
                         match on_unauthorized(self.has_refresh_token(), self.refreshing) {
                             UnauthorizedAction::StartRefresh => self.spawn_refresh(),
                             UnauthorizedAction::IgnoreStale => {}
@@ -378,6 +532,71 @@ impl IssueViewerApp {
                     } else {
                         self.refreshing = false;
                         self.status = e;
+                    }
+                }
+                UiMsg::CommentsReady {
+                    owner,
+                    repo,
+                    number,
+                    rate_remaining,
+                } => {
+                    if rate_remaining.is_some() {
+                        self.rate_remaining = rate_remaining;
+                    }
+                    let key = (owner.clone(), repo.clone(), number);
+                    if self.comments_inflight.as_ref() == Some(&key) {
+                        self.comments_inflight = None;
+                    }
+                    if self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|(o, r)| o == &owner && r == &repo)
+                        && self.selected_issue == Some(number)
+                    {
+                        match Cache::open(&Self::cache_path())
+                            .and_then(|cache| cache.list_comments(&owner, &repo, number))
+                        {
+                            Ok(Some(cached)) => {
+                                self.comments = cached.comments;
+                                self.comments_truncated = cached.truncated;
+                                self.comments_issue_updated_at = Some(cached.issue_updated_at);
+                                self.comments_for = Some(key);
+                                self.comments_loading = false;
+                                self.comments_error.clear();
+                            }
+                            Ok(None) => {
+                                self.comments.clear();
+                                self.comments_truncated = false;
+                                self.comments_issue_updated_at = None;
+                                self.comments_for = Some(key);
+                                self.comments_loading = false;
+                                self.comments_error.clear();
+                            }
+                            Err(err) => {
+                                self.comments_loading = false;
+                                self.comments_error = err.to_string();
+                            }
+                        }
+                    }
+                }
+                UiMsg::CommentsFailed {
+                    owner,
+                    repo,
+                    number,
+                    error,
+                } => {
+                    let key = (owner, repo, number);
+                    if self.comments_inflight.as_ref() == Some(&key) {
+                        self.comments_inflight = None;
+                    }
+                    if self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|(o, r)| o == &key.0 && r == &key.1)
+                        && self.selected_issue == Some(key.2)
+                    {
+                        self.comments_loading = false;
+                        self.comments_error = error;
                     }
                 }
             }
@@ -764,6 +983,131 @@ impl IssueViewerApp {
         }
     }
 
+    fn comment_error_text(&self) -> String {
+        let error = &self.comments_error;
+        if error.contains("rate_limited") {
+            self.lang.t("rate_limited").to_string()
+        } else if error == "auth required" {
+            self.lang.t("relogin_required").to_string()
+        } else if error == "offline" {
+            self.lang.t("offline").to_string()
+        } else {
+            error.clone()
+        }
+    }
+
+    fn show_comments_section(
+        &self,
+        ui: &mut eframe::egui::Ui,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) {
+        let shown = self
+            .comments_for
+            .as_ref()
+            .is_some_and(|(o, r, n)| o == owner && r == repo && *n == number);
+        if !shown {
+            return;
+        }
+        ui.add_space(16.0);
+        let count = self.comments.len();
+        let loading_empty = self.comments_loading && self.comments.is_empty();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(eframe::egui::RichText::new(self.lang.t("comments")).strong());
+            if !loading_empty {
+                let label = if self.comments_truncated {
+                    format!("{count}+")
+                } else {
+                    count.to_string()
+                };
+                ui.weak(label);
+            }
+        });
+        if loading_empty {
+            ui.weak(self.lang.t("loading_comments"));
+            return;
+        }
+        if self.comments_loading {
+            ui.weak(self.lang.t("loading_comments"));
+        }
+        if self.comments.is_empty() && !self.comments_error.is_empty() {
+            ui.weak(self.comment_error_text());
+            return;
+        }
+        if self.comments.is_empty() && self.comments_error.is_empty() && !self.comments_loading {
+            ui.weak(self.lang.t("no_comments"));
+            return;
+        }
+        for comment in &self.comments {
+            Self::show_comment_card(ui, self.lang, comment);
+        }
+        if self.comments_truncated {
+            ui.weak(self.lang.t("comments_truncated"));
+        }
+    }
+
+    fn show_comment_card(ui: &mut eframe::egui::Ui, lang: Lang, comment: &IssueComment) {
+        let rail_x = ui.cursor().min.x + 7.0;
+        let top = ui.cursor().min.y;
+        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        ui.painter().line_segment(
+            [
+                eframe::egui::pos2(rail_x, top),
+                eframe::egui::pos2(rail_x, top + 10.0),
+            ],
+            stroke,
+        );
+        ui.add_space(10.0);
+        let width = (ui.available_width() - 18.0).max(120.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(18.0);
+            eframe::egui::Frame::new()
+                .fill(crate::theme::THEME.chip_bg)
+                .stroke(stroke)
+                .corner_radius(8.0)
+                .inner_margin(eframe::egui::Margin::symmetric(10, 10))
+                .show(ui, |ui| {
+                    ui.set_min_width(width);
+                    ui.set_max_width(width);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        if comment.author.is_empty() {
+                            ui.strong(lang.t("deleted_user"));
+                        } else {
+                            ui.strong(&comment.author);
+                        }
+                        ui.weak(crate::timefmt::format_rfc3339_local(&comment.created_at));
+                        if !comment.updated_at.is_empty()
+                            && comment.updated_at != comment.created_at
+                        {
+                            Self::pill(
+                                ui,
+                                lang.t("edited"),
+                                crate::theme::THEME.chip_fg,
+                                crate::theme::THEME.chip_bg,
+                            );
+                        }
+                        if comment.minimized {
+                            Self::pill(
+                                ui,
+                                lang.t("minimized"),
+                                crate::theme::THEME.state_closed_fg,
+                                crate::theme::THEME.state_closed_bg,
+                            );
+                        }
+                    });
+                    if !comment.body.is_empty() {
+                        ui.add_space(4.0);
+                        crate::md::show(ui, &comment.body);
+                    }
+                });
+        });
+        ui.add_space(4.0);
+    }
+
     fn selected_row(&self) -> Option<&IssueRow> {
         let n = self.selected_issue?;
         self.all_rows.iter().find(|r| r.number == n)
@@ -863,6 +1207,7 @@ impl eframe::App for IssueViewerApp {
                     self.all_rows.clear();
                     self.selected = None;
                     self.selected_issue = None;
+                    self.clear_comments();
                     self.status.clear();
                 }
             });
@@ -888,6 +1233,7 @@ impl eframe::App for IssueViewerApp {
                     if let Some((owner, name)) = picked {
                         self.selected = Some((owner.clone(), name.clone()));
                         self.selected_issue = None;
+                        self.clear_comments();
                         self.persist_session();
                         self.reload_tree();
                         if let Some(token) = self.token_value.clone() {
@@ -1033,10 +1379,12 @@ impl eframe::App for IssueViewerApp {
             self.selected_issue = Some(n);
             self.selection_pane = Pane::Right;
             self.persist_session();
+            self.ensure_comments();
         } else if let Some(n) = left_click {
             self.selected_issue = Some(n);
             self.selection_pane = Pane::Left;
             self.persist_session();
+            self.ensure_comments();
         }
 
         let left_w = left.response.rect.width();
@@ -1116,6 +1464,7 @@ impl eframe::App for IssueViewerApp {
                 ui.separator();
                 eframe::egui::ScrollArea::vertical().show(ui, |ui| {
                     crate::md::show(ui, &row.body);
+                    self.show_comments_section(ui, &owner, &repo, row.number);
                 });
             } else {
                 ui.label(self.lang.t("select_issue"));
