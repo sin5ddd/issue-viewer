@@ -11,18 +11,25 @@ pub fn sync_repo(
     owner: &str,
     repo: &str,
 ) -> Result<Option<u32>, GitHubError> {
-    let since = cache
+    let meta_current = cache
+        .issue_meta_current(owner, repo)
+        .map_err(|e| GitHubError::Http(e.to_string()))?;
+    let cached_since = cache
         .max_updated_at(owner, repo)
         .map_err(|e| GitHubError::Http(e.to_string()))?;
-    let full_replace = since.is_none();
+    // Old caches have titles but not labels/type/fields. Fetch once without `since`.
+    let since = if meta_current { cached_since } else { None };
+    let want_replace = since.is_none();
     let mut all = Vec::new();
     let mut cursor: Option<String> = None;
     let mut remaining = None::<u32>;
+    let mut stopped_early = false;
     loop {
         let mut page = client.fetch_issue_page(owner, repo, cursor.as_deref(), since.as_deref())?;
         remaining = page.rate_remaining.or(remaining);
         all.append(&mut page.rows);
         if page.rate_remaining.is_some_and(|n| n < 100) {
+            stopped_early = true;
             break;
         }
         if !page.has_next {
@@ -30,7 +37,7 @@ pub fn sync_repo(
         }
         cursor = page.end_cursor;
     }
-    if full_replace {
+    if want_replace && !stopped_early {
         cache
             .replace_issues(owner, repo, &all)
             .map_err(|e| GitHubError::Http(e.to_string()))?;
@@ -46,6 +53,11 @@ pub fn sync_repo(
     cache
         .set_last_synced(owner, repo, &ts)
         .map_err(|e| GitHubError::Http(e.to_string()))?;
+    if !stopped_early {
+        cache
+            .set_meta_rev(owner, repo, Cache::ISSUE_META_REV)
+            .map_err(|e| GitHubError::Http(e.to_string()))?;
+    }
     Ok(remaining)
 }
 
@@ -96,6 +108,9 @@ mod tests {
             parent_number: parent,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
+            labels: Vec::new(),
+            issue_type: None,
+            fields: Vec::new(),
         }
     }
 
@@ -216,5 +231,28 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert!(got.iter().any(|r| r.number == 2));
         assert_eq!(fake.seen_since.borrow().len(), 1);
+    }
+
+    #[test]
+    fn stale_meta_refetches_without_since() {
+        let cache = Cache::open_memory().unwrap();
+        cache.upsert_issues("acme", "app", &[row(1, None)]).unwrap();
+        let mut fetched = row(1, None);
+        fetched.labels = vec![crate::model::IssueLabel {
+            name: "bug".into(),
+            color: "d73a4a".into(),
+        }];
+        let fake = Fake::new(vec![IssuePage {
+            rows: vec![fetched],
+            has_next: false,
+            end_cursor: None,
+            rate_remaining: Some(4000),
+            rate_cost: Some(1),
+        }]);
+        sync_repo(&cache, &fake, "acme", "app").unwrap();
+        assert_eq!(fake.seen_since.borrow().as_slice(), &[None]);
+        let got = cache.list_issues("acme", "app").unwrap();
+        assert_eq!(got[0].labels[0].name, "bug");
+        assert!(cache.issue_meta_current("acme", "app").unwrap());
     }
 }

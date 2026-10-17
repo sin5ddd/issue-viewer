@@ -66,6 +66,12 @@ impl Lang {
             (Lang::Ja, "reloading") => "再読み込み中…",
             (Lang::En, "relogin_required") => "Sign in again",
             (Lang::Ja, "relogin_required") => "再ログインが必要です",
+            (Lang::En, "type") => "Type",
+            (Lang::Ja, "type") => "タイプ",
+            (Lang::En, "labels") => "Labels",
+            (Lang::Ja, "labels") => "ラベル",
+            (Lang::En, "fields") => "Fields",
+            (Lang::Ja, "fields") => "フィールド",
             _ => key,
         }
     }

@@ -24,6 +24,7 @@ pub fn matches_query(row: &IssueRow, query: &str) -> bool {
         return true;
     }
     let title = row.title.to_ascii_lowercase();
+    let extra = meta_haystack(row);
     tokens.iter().all(|tok| {
         let t = tok.to_ascii_lowercase();
         if let Some(rest) = t.strip_prefix('#') {
@@ -32,8 +33,23 @@ pub fn matches_query(row: &IssueRow, query: &str) -> bool {
         if let Ok(n) = t.parse::<u64>() {
             return n == row.number;
         }
-        title.contains(&t)
+        title.contains(&t) || extra.contains(&t)
     })
+}
+
+fn meta_haystack(row: &IssueRow) -> String {
+    let mut parts = Vec::new();
+    if let Some(t) = &row.issue_type {
+        parts.push(t.name.to_ascii_lowercase());
+    }
+    for label in &row.labels {
+        parts.push(label.name.to_ascii_lowercase());
+    }
+    for field in &row.fields {
+        parts.push(field.name.to_ascii_lowercase());
+        parts.push(field.value.to_ascii_lowercase());
+    }
+    parts.join("\n")
 }
 
 fn state_flags_from_query(query: &str, show_open: bool, show_closed: bool) -> (bool, bool) {
@@ -110,6 +126,9 @@ mod tests {
             parent_number: None,
             created_at: created.into(),
             updated_at: updated.into(),
+            labels: Vec::new(),
+            issue_type: None,
+            fields: Vec::new(),
         }
     }
 
@@ -174,5 +193,52 @@ mod tests {
         let got = apply(&rows, "", true, false, SortKey::Updated, SortDir::Desc);
         assert_eq!(got[0].number, 2);
         assert_eq!(got[1].number, 1);
+    }
+
+    #[test]
+    fn query_matches_label_type_and_field() {
+        let mut issue = row(9, "plain", IssueState::Open, "1", "1");
+        issue.labels = vec![crate::model::IssueLabel {
+            name: "good-first-issue".into(),
+            color: String::new(),
+        }];
+        issue.issue_type = Some(crate::model::IssueTypeRef {
+            name: "Feature".into(),
+            color: "GREEN".into(),
+        });
+        issue.fields = vec![crate::model::IssueFieldValue {
+            name: "Priority".into(),
+            value: "P0".into(),
+            color: None,
+        }];
+        let rows = vec![issue, row(1, "other", IssueState::Open, "1", "1")];
+        assert_eq!(
+            apply(
+                &rows,
+                "good-first",
+                true,
+                true,
+                SortKey::Updated,
+                SortDir::Desc
+            )[0]
+            .number,
+            9
+        );
+        assert_eq!(
+            apply(
+                &rows,
+                "feature",
+                true,
+                true,
+                SortKey::Updated,
+                SortDir::Desc
+            )[0]
+            .number,
+            9
+        );
+        assert_eq!(
+            apply(&rows, "p0", true, true, SortKey::Updated, SortDir::Desc)[0].number,
+            9
+        );
     }
 }

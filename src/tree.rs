@@ -95,6 +95,9 @@ mod tests {
             parent_number: parent,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
+            labels: Vec::new(),
+            issue_type: None,
+            fields: Vec::new(),
         }
     }
 

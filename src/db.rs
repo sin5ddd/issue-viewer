@@ -80,6 +80,10 @@ impl Cache {
             "ALTER TABLE issues ADD COLUMN body TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE issues ADD COLUMN created_at TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE session ADD COLUMN issue_number INTEGER",
+            "ALTER TABLE issues ADD COLUMN labels_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE issues ADD COLUMN issue_type_json TEXT",
+            "ALTER TABLE issues ADD COLUMN fields_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE sync_meta ADD COLUMN meta_rev INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = self.conn.execute_batch(sql);
         }
@@ -130,15 +134,18 @@ impl Cache {
         rows: &[IssueRow],
     ) -> Result<()> {
         let mut stmt = tx.prepare(
-            "INSERT INTO issues (owner, repo, number, title, state, parent_number, updated_at, body, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO issues (owner, repo, number, title, state, parent_number, updated_at, body, created_at, labels_json, issue_type_json, fields_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(owner, repo, number) DO UPDATE SET
                title = excluded.title,
                state = excluded.state,
                parent_number = excluded.parent_number,
                updated_at = excluded.updated_at,
                body = excluded.body,
-               created_at = excluded.created_at",
+               created_at = excluded.created_at,
+               labels_json = excluded.labels_json,
+               issue_type_json = excluded.issue_type_json,
+               fields_json = excluded.fields_json",
         )?;
         for r in rows {
             let state = match r.state {
@@ -155,6 +162,11 @@ impl Cache {
                 r.updated_at,
                 r.body,
                 r.created_at,
+                serde_json::to_string(&r.labels).unwrap_or_else(|_| "[]".into()),
+                r.issue_type
+                    .as_ref()
+                    .and_then(|t| serde_json::to_string(t).ok()),
+                serde_json::to_string(&r.fields).unwrap_or_else(|_| "[]".into()),
             ])?;
         }
         Ok(())
@@ -189,12 +201,15 @@ impl Cache {
 
     pub fn list_issues(&self, owner: &str, repo: &str) -> Result<Vec<IssueRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT number, title, state, parent_number, updated_at, body, created_at
+            "SELECT number, title, state, parent_number, updated_at, body, created_at, labels_json, issue_type_json, fields_json
              FROM issues WHERE owner = ?1 AND repo = ?2 ORDER BY number",
         )?;
         let rows = stmt.query_map(rusqlite::params![owner, repo], |row| {
             let state_s: String = row.get(2)?;
             let parent: Option<i64> = row.get(3)?;
+            let labels_json: String = row.get(7)?;
+            let type_json: Option<String> = row.get(8)?;
+            let fields_json: String = row.get(9)?;
             Ok(IssueRow {
                 number: row.get::<_, i64>(0)? as u64,
                 title: row.get(1)?,
@@ -207,6 +222,9 @@ impl Cache {
                 updated_at: row.get(4)?,
                 body: row.get(5)?,
                 created_at: row.get(6)?,
+                labels: serde_json::from_str(&labels_json).unwrap_or_default(),
+                issue_type: type_json.and_then(|s| serde_json::from_str(&s).ok()),
+                fields: serde_json::from_str(&fields_json).unwrap_or_default(),
             })
         })?;
         rows.collect()
@@ -227,6 +245,29 @@ impl Cache {
             "INSERT INTO sync_meta (owner, repo, last_synced_rfc3339) VALUES (?1, ?2, ?3)
              ON CONFLICT(owner, repo) DO UPDATE SET last_synced_rfc3339 = excluded.last_synced_rfc3339",
             rusqlite::params![owner, repo, ts],
+        )?;
+        Ok(())
+    }
+
+    /// 1 once a repo has been fully fetched with labels, type, and issue fields.
+    pub const ISSUE_META_REV: i64 = 1;
+
+    pub fn issue_meta_current(&self, owner: &str, repo: &str) -> Result<bool> {
+        let rev: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT meta_rev FROM sync_meta WHERE owner = ?1 AND repo = ?2",
+                rusqlite::params![owner, repo],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(rev.unwrap_or(0) >= Self::ISSUE_META_REV)
+    }
+
+    pub fn set_meta_rev(&self, owner: &str, repo: &str, rev: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sync_meta SET meta_rev = ?3 WHERE owner = ?1 AND repo = ?2",
+            rusqlite::params![owner, repo, rev],
         )?;
         Ok(())
     }
@@ -272,6 +313,9 @@ mod tests {
             parent_number: parent,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
+            labels: Vec::new(),
+            issue_type: None,
+            fields: Vec::new(),
         }
     }
 
@@ -287,6 +331,38 @@ mod tests {
         assert_eq!(two.parent_number, Some(1));
         assert_eq!(two.body, "body2");
         assert_eq!(two.created_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn metadata_roundtrip() {
+        let cache = Cache::open_memory().unwrap();
+        let mut issue = row(4, None);
+        issue.labels = vec![crate::model::IssueLabel {
+            name: "bug".into(),
+            color: "d73a4a".into(),
+        }];
+        issue.issue_type = Some(crate::model::IssueTypeRef {
+            name: "Bug".into(),
+            color: "RED".into(),
+        });
+        issue.fields = vec![crate::model::IssueFieldValue {
+            name: "Priority".into(),
+            value: "P1".into(),
+            color: Some("RED".into()),
+        }];
+        cache.upsert_issues("acme", "app", &[issue]).unwrap();
+        let got = cache.list_issues("acme", "app").unwrap();
+        assert_eq!(got[0].labels[0].name, "bug");
+        assert_eq!(got[0].labels[0].color, "d73a4a");
+        assert_eq!(got[0].issue_type.as_ref().unwrap().name, "Bug");
+        assert_eq!(got[0].fields[0].name, "Priority");
+        assert_eq!(got[0].fields[0].value, "P1");
+        assert!(!cache.issue_meta_current("acme", "app").unwrap());
+        cache.set_last_synced("acme", "app", "1").unwrap();
+        cache
+            .set_meta_rev("acme", "app", Cache::ISSUE_META_REV)
+            .unwrap();
+        assert!(cache.issue_meta_current("acme", "app").unwrap());
     }
 
     #[test]

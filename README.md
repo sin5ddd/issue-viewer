@@ -11,7 +11,8 @@ See [SPEC.md](SPEC.md).
 - Sign in with GitHub OAuth Device Flow (session kept until Sign out)
 - Restore last repository, issue, window size, and pane widths
 - Three panes: issue tree, markdown body, related parent/child
-- Filter/sort (`is:open`, Open/Closed, created/updated)
+- GitHub labels, issue type, and issue fields on the tree and in the issue pane
+- Filter/sort (`is:open`, Open/Closed, created/updated; also matches label, type, and field text)
 - English and Japanese UI
 - Bundled Noto Sans JP (SIL Open Font License)
 

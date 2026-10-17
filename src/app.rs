@@ -450,6 +450,7 @@ impl IssueViewerApp {
 
     fn show_tree(
         ui: &mut eframe::egui::Ui,
+        lang: Lang,
         nodes: &[TreeNode],
         selected: Option<u64>,
         clicked: &mut Option<u64>,
@@ -462,20 +463,25 @@ impl IssueViewerApp {
         ui.with_layout(
             eframe::egui::Layout::top_down(eframe::egui::Align::LEFT).with_cross_justify(true),
             |ui| {
-                Self::show_tree_rows(ui, nodes, selected, clicked, id_ns, active);
+                let gutter = Self::state_gutter(ui);
+                Self::show_tree_rows(ui, lang, nodes, selected, clicked, id_ns, active, 0, gutter);
             },
         );
     }
 
     fn show_tree_rows(
         ui: &mut eframe::egui::Ui,
+        lang: Lang,
         nodes: &[TreeNode],
         selected: Option<u64>,
         clicked: &mut Option<u64>,
         id_ns: u64,
         active: bool,
+        depth: usize,
+        gutter: f32,
     ) {
         ui.spacing_mut().item_spacing.y = 2.0;
+        let indent = ui.spacing().indent;
         for node in nodes {
             let is_sel = selected == Some(node.issue.number);
             let id = ui.make_persistent_id((id_ns, node.issue.number));
@@ -498,11 +504,28 @@ impl IssueViewerApp {
                 };
                 ui.painter().rect_filled(rect, 3.0, fill);
             }
+            let state_rect = eframe::egui::Rect::from_min_size(
+                rect.min,
+                eframe::egui::vec2(gutter, rect.height()),
+            );
             ui.allocate_new_ui(
-                eframe::egui::UiBuilder::new().max_rect(rect).layout(
+                eframe::egui::UiBuilder::new().max_rect(state_rect).layout(
                     eframe::egui::Layout::left_to_right(eframe::egui::Align::Center),
                 ),
                 |ui| {
+                    Self::state_pill(ui, node.issue.state);
+                },
+            );
+            let body_rect = eframe::egui::Rect::from_min_max(
+                eframe::egui::pos2(rect.min.x + gutter, rect.min.y),
+                rect.max,
+            );
+            ui.allocate_new_ui(
+                eframe::egui::UiBuilder::new().max_rect(body_rect).layout(
+                    eframe::egui::Layout::left_to_right(eframe::egui::Align::Center),
+                ),
+                |ui| {
+                    ui.add_space(depth as f32 * indent);
                     if has_children {
                         if Self::disclosure(ui, open) {
                             open = !open;
@@ -514,7 +537,7 @@ impl IssueViewerApp {
                         eframe::egui::Label::new(format!("#{}", node.issue.number))
                             .selectable(false),
                     );
-                    Self::state_pill(ui, node.issue.state);
+                    Self::tree_meta(ui, &node.issue);
                     ui.add(
                         eframe::egui::Label::new(&node.issue.title)
                             .truncate()
@@ -523,14 +546,41 @@ impl IssueViewerApp {
                     );
                 },
             );
+            let tip = Self::meta_tooltip(lang, &node.issue);
             if row_resp.clicked() {
                 *clicked = Some(node.issue.number);
             }
+            if !tip.is_empty() {
+                row_resp.on_hover_text(tip);
+            }
             ui.data_mut(|d| d.insert_persisted(id, open));
             if has_children && open {
-                ui.indent(id, |ui| {
-                    Self::show_tree_rows(ui, &node.children, selected, clicked, id_ns, active);
-                });
+                let top = ui.cursor().min.y;
+                let line_x = rect.min.x + gutter + (depth as f32 + 0.5) * indent;
+                Self::show_tree_rows(
+                    ui,
+                    lang,
+                    &node.children,
+                    selected,
+                    clicked,
+                    id_ns,
+                    active,
+                    depth + 1,
+                    gutter,
+                );
+                if ui.visuals().indent_has_left_vline {
+                    let bottom = ui.cursor().min.y - ui.spacing().item_spacing.y - 2.0;
+                    if bottom > top {
+                        let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+                        ui.painter().line_segment(
+                            [
+                                eframe::egui::pos2(line_x, top),
+                                eframe::egui::pos2(line_x, bottom),
+                            ],
+                            stroke,
+                        );
+                    }
+                }
             }
         }
     }
@@ -561,6 +611,22 @@ impl IssueViewerApp {
         resp.clicked()
     }
 
+    fn state_gutter(ui: &eframe::egui::Ui) -> f32 {
+        let font = eframe::egui::TextStyle::Small.resolve(ui.style());
+        let text_w = ui.fonts(|fonts| {
+            fonts
+                .layout_no_wrap(
+                    "Closed".to_owned(),
+                    font,
+                    eframe::egui::Color32::PLACEHOLDER,
+                )
+                .size()
+                .x
+        });
+        // Pill padding plus a gap so the indent rule starts clear of the chip.
+        text_w + 20.0
+    }
+
     fn state_pill(ui: &mut eframe::egui::Ui, state: crate::model::IssueState) {
         let theme = crate::theme::THEME;
         match state {
@@ -589,6 +655,113 @@ impl IssueViewerApp {
                         .selectable(false),
                 );
             });
+    }
+
+    fn colored_pill(ui: &mut eframe::egui::Ui, text: &str, color: &str) {
+        let (fg, bg) = crate::theme::chip_colors(color);
+        Self::pill(ui, text, fg, bg);
+    }
+
+    fn tree_meta(ui: &mut eframe::egui::Ui, row: &IssueRow) {
+        if let Some(kind) = &row.issue_type {
+            Self::colored_pill(ui, &kind.name, &kind.color);
+        }
+        let shown_labels = row.labels.len().min(2);
+        for label in row.labels.iter().take(shown_labels) {
+            Self::colored_pill(ui, &label.name, &label.color);
+        }
+        if let Some(field) = row.fields.first() {
+            let text = format!("{}: {}", field.name, Self::clip(&field.value, 18));
+            if let Some(color) = field.color.as_deref().filter(|c| !c.is_empty()) {
+                Self::colored_pill(ui, &text, color);
+            } else {
+                let theme = crate::theme::THEME;
+                Self::pill(ui, &text, theme.chip_fg, theme.chip_bg);
+            }
+        }
+        let hidden = row.labels.len().saturating_sub(shown_labels)
+            + row
+                .fields
+                .len()
+                .saturating_sub(usize::from(!row.fields.is_empty()));
+        if hidden > 0 {
+            ui.weak(format!("+{hidden}"));
+        }
+    }
+
+    fn meta_tooltip(lang: Lang, row: &IssueRow) -> String {
+        let mut lines = Vec::new();
+        if let Some(kind) = &row.issue_type {
+            lines.push(format!("{}: {}", lang.t("type"), kind.name));
+        }
+        if !row.labels.is_empty() {
+            let names = row
+                .labels
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("{}: {}", lang.t("labels"), names));
+        }
+        for field in &row.fields {
+            lines.push(format!("{}: {}", field.name, field.value));
+        }
+        lines.join("\n")
+    }
+
+    fn show_type_and_labels(ui: &mut eframe::egui::Ui, lang: Lang, row: &IssueRow) {
+        if row.issue_type.is_none() && row.labels.is_empty() {
+            return;
+        }
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if let Some(kind) = &row.issue_type {
+                ui.weak(lang.t("type"));
+                Self::colored_pill(ui, &kind.name, &kind.color);
+            }
+            if !row.labels.is_empty() {
+                ui.weak(lang.t("labels"));
+                for label in &row.labels {
+                    Self::colored_pill(ui, &label.name, &label.color);
+                }
+            }
+        });
+    }
+
+    fn show_fields(ui: &mut eframe::egui::Ui, lang: Lang, row: &IssueRow) {
+        if row.fields.is_empty() {
+            return;
+        }
+        ui.weak(lang.t("fields"));
+        eframe::egui::Grid::new(("issue_fields", row.number))
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                for field in &row.fields {
+                    ui.weak(&field.name);
+                    if let Some(color) = field.color.as_deref().filter(|c| !c.is_empty()) {
+                        Self::colored_pill(ui, &field.value, color);
+                    } else {
+                        ui.add(
+                            eframe::egui::Label::new(&field.value)
+                                .wrap_mode(eframe::egui::TextWrapMode::Wrap),
+                        );
+                    }
+                    ui.end_row();
+                }
+            });
+        ui.add_space(6.0);
+    }
+
+    fn clip(s: &str, n: usize) -> String {
+        let mut chars = s.chars();
+        let head: String = chars.by_ref().take(n).collect();
+        if chars.next().is_some() {
+            format!("{head}…")
+        } else {
+            head
+        }
     }
 
     fn selected_row(&self) -> Option<&IssueRow> {
@@ -819,6 +992,7 @@ impl eframe::App for IssueViewerApp {
                         ui.set_width(ui.available_width());
                         Self::show_tree(
                             ui,
+                            self.lang,
                             &self.tree,
                             self.selected_issue,
                             &mut left_click,
@@ -846,6 +1020,7 @@ impl eframe::App for IssueViewerApp {
                         ui.set_width(ui.available_width());
                         Self::show_tree(
                             ui,
+                            self.lang,
                             &related,
                             self.selected_issue,
                             &mut right_click,
@@ -929,6 +1104,8 @@ impl eframe::App for IssueViewerApp {
                         theme.chip_bg,
                     );
                 });
+                Self::show_type_and_labels(ui, self.lang, &row);
+                Self::show_fields(ui, self.lang, &row);
                 if ui.button(self.lang.t("open_issue")).clicked() {
                     let url = format!(
                         "https://github.com/{}/{}/issues/{}",
