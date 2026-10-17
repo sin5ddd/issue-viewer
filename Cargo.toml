@@ -16,7 +16,11 @@ webbrowser = "1"
 dirs = "5"
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-pulldown-cmark = { version = "0.13", default-features = false }
+egui_commonmark = { version = "0.20", default-features = false, features = ["pulldown_cmark", "load-images", "fetch", "svg"] }
+egui_extras = { version = "0.31", default-features = false, features = ["image", "svg", "http", "file"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+rusty-mermaid = "=0.2.0"
+rusty-mermaid-core = "=0.2.0"
 
 [dev-dependencies]
 tempfile = "3"

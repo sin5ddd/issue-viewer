@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -95,6 +96,7 @@ pub struct IssueViewerApp {
     comments_inflight: Option<(String, String, u64)>,
     comments_error: String,
     layout: UiLayout,
+    md_cache: RefCell<egui_commonmark::CommonMarkCache>,
     tx: Sender<UiMsg>,
     rx: Receiver<UiMsg>,
 }
@@ -102,6 +104,7 @@ pub struct IssueViewerApp {
 impl IssueViewerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         crate::fonts::install(&cc.egui_ctx);
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         let (tx, rx) = mpsc::channel();
         let tokens = KeyringTokenStore;
         let stored = tokens.load().map(|raw| decode_stored_auth(&raw));
@@ -144,6 +147,7 @@ impl IssueViewerApp {
                 .ok()
                 .and_then(|c| c.ui_layout().ok())
                 .unwrap_or_default(),
+            md_cache: RefCell::new(egui_commonmark::CommonMarkCache::default()),
             tx,
             rx,
         };
@@ -1040,15 +1044,21 @@ impl IssueViewerApp {
             ui.weak(self.lang.t("no_comments"));
             return;
         }
+        let mut cache = self.md_cache.borrow_mut();
         for comment in &self.comments {
-            Self::show_comment_card(ui, self.lang, comment);
+            Self::show_comment_card(ui, self.lang, comment, &mut cache);
         }
         if self.comments_truncated {
             ui.weak(self.lang.t("comments_truncated"));
         }
     }
 
-    fn show_comment_card(ui: &mut eframe::egui::Ui, lang: Lang, comment: &IssueComment) {
+    fn show_comment_card(
+        ui: &mut eframe::egui::Ui,
+        lang: Lang,
+        comment: &IssueComment,
+        cache: &mut egui_commonmark::CommonMarkCache,
+    ) {
         let rail_x = ui.cursor().min.x + 7.0;
         let top = ui.cursor().min.y;
         let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
@@ -1101,7 +1111,7 @@ impl IssueViewerApp {
                     });
                     if !comment.body.is_empty() {
                         ui.add_space(4.0);
-                        crate::md::show(ui, &comment.body);
+                        crate::md::show(ui, cache, &comment.body);
                     }
                 });
         });
@@ -1316,6 +1326,7 @@ impl eframe::App for IssueViewerApp {
                     }
                 }
             });
+            open_clicked_urls(ctx);
             ctx.request_repaint_after(Duration::from_millis(200));
             return;
         }
@@ -1463,17 +1474,43 @@ impl eframe::App for IssueViewerApp {
                 }
                 ui.separator();
                 eframe::egui::ScrollArea::vertical().show(ui, |ui| {
-                    crate::md::show(ui, &row.body);
+                    {
+                        let mut cache = self.md_cache.borrow_mut();
+                        crate::md::show(ui, &mut cache, &row.body);
+                    }
                     self.show_comments_section(ui, &owner, &repo, row.number);
                 });
             } else {
                 ui.label(self.lang.t("select_issue"));
             }
         });
+        open_clicked_urls(ctx);
         ctx.request_repaint_after(Duration::from_millis(200));
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.persist_layout();
+    }
+}
+
+#[allow(deprecated)]
+fn open_clicked_urls(ctx: &eframe::egui::Context) {
+    let mut urls = Vec::new();
+    ctx.output_mut(|o| {
+        if let Some(open) = o.open_url.take() {
+            urls.push(open.url);
+        }
+        o.commands.retain(|cmd| match cmd {
+            eframe::egui::OutputCommand::OpenUrl(open) => {
+                urls.push(open.url.clone());
+                false
+            }
+            _ => true,
+        });
+    });
+    for url in urls {
+        if url.starts_with("https://") || url.starts_with("http://") {
+            let _ = webbrowser::open(&url);
+        }
     }
 }

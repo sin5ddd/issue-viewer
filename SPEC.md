@@ -30,6 +30,7 @@ This app is a lightweight desktop viewer: sign in with GitHub OAuth, pick a repo
 - Each row shows open/closed in a left column, to the left of the sub-issue indent rules. The collapse control, issue number, and title follow those rules, plus the issue type, up to two labels, and the first issue field when those are set. State, type, label, and field chips use a pale tint rather than a solid fill. Further labels and fields stay on the row tooltip.
 - Choosing a row opens that GitHub issue in the default browser.
 - The center pane shows the issue type, every label, and every issue field value from the cache, above the body. Issue fields are GitHub issue fields (sidebar metadata such as Priority), not GitHub Project fields. Comments hang below the body as cards in the same scroll area, oldest first.
+- The center pane body and comment bodies render GitHub Flavored Markdown in the same scroll. `mermaid` fences are drawn there from a local scene. Issue text is not sent to an external diagram or markdown service. egui and eframe stay on 0.31.
 - First release is read-only. The app does not create, edit, or close issues, and does not change parent/child links.
 - Loading and failure states are visible in the bottom status bar, not under the toolbar. Reload progress and a re-login prompt (expired or rejected token) stay there while the cached tree remains on screen.
 - UI chrome is available in Japanese and English from the first release. Default follows the OS locale when it is Japanese or English; otherwise English. The user can switch language in the app.
